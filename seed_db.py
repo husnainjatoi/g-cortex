@@ -17,7 +17,8 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost/gco
 
 
 def seed():
-    conn = psycopg2.connect(DB_URL)
+    url = DB_URL.replace("postgresql+psycopg2://", "postgresql://")
+    conn = psycopg2.connect(url)
     conn.autocommit = True
     cur = conn.cursor()
 
@@ -200,6 +201,27 @@ def seed():
             suspended_until DATE,
             strike_history  TEXT
         );
+    """)
+
+    # ── Ensure columns exist on pre-existing tables ────────────
+    cur.execute("""
+        ALTER TABLE courses ADD COLUMN IF NOT EXISTS slot VARCHAR(30);
+        ALTER TABLE courses ADD COLUMN IF NOT EXISTS category VARCHAR(30) DEFAULT 'core';
+        ALTER TABLE courses ADD COLUMN IF NOT EXISTS domains TEXT;
+
+        ALTER TABLE venues ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'general';
+        ALTER TABLE venues ADD COLUMN IF NOT EXISTS facilities TEXT;
+        ALTER TABLE venues ADD COLUMN IF NOT EXISTS description TEXT;
+
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_code VARCHAR(30);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_date DATE;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS start_time VARCHAR(10);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS duration_hours NUMERIC(4, 2) DEFAULT 1.0;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS checkin_token VARCHAR(20);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS checkin_status VARCHAR(20) DEFAULT 'pending_checkin';
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS source VARCHAR(50);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_code ON bookings (booking_code);
     """)
 
     print("[*] Seeding data across all domains...")
