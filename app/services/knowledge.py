@@ -100,7 +100,7 @@ def ingest_url(fetcher, url: str, force: bool = False) -> dict:
         return {"url": url, "result": "unchanged"}
     if doc_type == "pdf":
         title, text, pages = crawler.extract_pdf(f.content)
-        title = title or url.rsplit("/", 1)[-1]
+        title = crawler.humanise_title(url, title)
     else:
         title, text, _ = crawler.extract_html(f.content)
         pages = None

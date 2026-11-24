@@ -156,6 +156,13 @@ def extract_html(content: bytes) -> tuple[str, str, list[str]]:
     return title, text, links
 
 
+def humanise_title(url: str, meta: str = "") -> str:
+    """Stable, descriptive title: the document's file name (PDF metadata titles are often generic, e.g. 'Dear Students')."""
+    stem = re.sub(r"\.pdf$", "", url.rstrip("/").rsplit("/", 1)[-1], flags=re.I)
+    name = re.sub(r"[-_]+", " ", stem).strip()
+    return name or meta or url
+
+
 def extract_pdf(content: bytes) -> tuple[str, str, int]:
     """-> (title, text with <<PAGE n>> markers, page count)."""
     from pypdf import PdfReader

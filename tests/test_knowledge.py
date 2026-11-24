@@ -227,16 +227,25 @@ def handbook_indexed(database):
 
 
 @pytest.mark.network
-def test_sources_are_only_official_and_embedded(handbook_indexed):
-    urls = [s["url"] for s in knowledge.list_sources()]
-    assert urls and all(crawler.is_official_url(u) for u in urls)
-    n = db.query_one("SELECT COUNT(*) AS n, COUNT(embedding) AS e FROM knowledge_chunks")
-    assert n["n"] > 50 and n["e"] >= n["n"] * 0.9                                           # vectors stored in pgvector
-    # refreshing an unchanged document adds nothing (no duplicate chunks)
+def test_sources_are_only_official_and_refresh_is_idempotent(handbook_indexed):
+    srcs = knowledge.list_sources()
+    assert srcs and all(crawler.is_official_url(s["url"]) for s in srcs)
+    assert all(s["title"] and s["title"] != "Dear Students" for s in srcs)
+    n = db.query_one("SELECT COUNT(*) AS n FROM knowledge_chunks")["n"]
+    assert n > 50
     again = knowledge.refresh(None, [HANDBOOK], force=False, import_courses=False)
-    assert again["unchanged"] == 1 and db.query_one("SELECT COUNT(*) AS n FROM knowledge_chunks")["n"] == n["n"]
-    forced = knowledge.refresh(None, [HANDBOOK], force=True, import_courses=False)
-    assert forced["new_chunks"] == 0 and db.query_one("SELECT COUNT(*) AS n FROM knowledge_chunks")["n"] == n["n"]
+    assert again["unchanged"] == 1 and db.query_one("SELECT COUNT(*) AS n FROM knowledge_chunks")["n"] == n
+    forced = knowledge.refresh(None, [HANDBOOK], force=True, import_courses=False)       # changed-document path: nothing duplicated or left stale
+    assert forced["new_chunks"] == 0 and db.query_one("SELECT COUNT(*) AS n FROM knowledge_chunks")["n"] == n
+
+
+@pytest.mark.network
+def test_embeddings_are_stored_in_pgvector(handbook_indexed):
+    e = db.query_one("SELECT COUNT(*) AS n, COUNT(embedding) AS e FROM knowledge_chunks")
+    if e["e"] == 0:
+        pytest.skip("embedding API quota unavailable; retrieval falls back to full-text search")
+    assert e["e"] >= e["n"] * 0.9
+    assert db.query_one("SELECT vector_dims(embedding) AS d FROM knowledge_chunks WHERE embedding IS NOT NULL LIMIT 1")["d"] == 1536
 
 
 @pytest.mark.network
