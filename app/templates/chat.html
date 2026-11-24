@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>G-Cortex | Central Orchestrator Chat</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root {
+      --primary: #0F2D59;
+      --primary-light: #1A4480;
+      --accent: #E5A823;
+      --bg-dark: #0A192F;
+      --bg-light: #F4F6F9;
+      --text-main: #1F2937;
+      --text-muted: #6B7280;
+      --bubble-user: #1A4480;
+      --bubble-assistant: #FFFFFF;
+      --border-color: #E2E8F0;
+      --success: #10B981;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      background: var(--bg-light);
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--primary);
+      color: #fff;
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 3px solid var(--accent);
+      box-shadow: var(--shadow-md);
+      z-index: 10;
+    }
+
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-icon {
+      font-size: 24px;
+      color: var(--accent);
+    }
+
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+
+    .brand-subtitle {
+      font-size: 11px;
+      color: #93C5FD;
+      font-weight: 400;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .session-badge {
+      background: rgba(255, 255, 255, 0.12);
+      padding: 4px 10px;
+      border-radius: 14px;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #E0E7FF;
+      font-family: monospace;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .session-badge:hover {
+      background: rgba(255, 255, 255, 0.22);
+    }
+
+    .btn-new-chat {
+      background: var(--accent);
+      color: #0F2D59;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: transform 0.1s, opacity 0.2s;
+    }
+
+    .btn-new-chat:hover {
+      opacity: 0.92;
+      transform: translateY(-1px);
+    }
+
+    /* ── Subagents Bar ── */
+    .subagents-bar {
+      background: #FFFFFF;
+      padding: 8px 24px;
+      display: flex;
+      gap: 16px;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 12px;
+      color: var(--text-muted);
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .agent-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      background: #F1F5F9;
+      font-weight: 500;
+    }
+
+    .agent-pill.active {
+      color: var(--primary);
+      background: #E0E7FF;
+    }
+
+    .agent-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+    }
+
+    /* ── Chat Container ── */
+    .chat-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      max-width: 960px;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    .welcome-card {
+      background: #FFFFFF;
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: var(--shadow-sm);
+      text-align: center;
+      margin-top: 20px;
+    }
+
+    .welcome-card h2 {
+      color: var(--primary);
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+
+    .welcome-card p {
+      color: var(--text-muted);
+      font-size: 13px;
+      max-width: 600px;
+      margin: 0 auto 18px;
+      line-height: 1.5;
+    }
+
+    .prompt-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+    }
+
+    .chip {
+      background: #F8FAFC;
+      border: 1px solid #CBD5E1;
+      color: #334155;
+      padding: 6px 12px;
+      border-radius: 16px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .chip:hover {
+      background: #E0E7FF;
+      color: var(--primary);
+      border-color: #93C5FD;
+    }
+
+    /* ── Message Rows ── */
+    .message-row {
+      display: flex;
+      width: 100%;
+      margin-bottom: 4px;
+    }
+
+    .message-row.user {
+      justify-content: flex-end;
+    }
+
+    .message-row.assistant {
+      justify-content: flex-start;
+    }
+
+    .message-bubble {
+      max-width: 78%;
+      padding: 14px 18px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.55;
+      position: relative;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .message-row.user .message-bubble {
+      background: var(--bubble-user);
+      color: #FFFFFF;
+      border-bottom-right-radius: 3px;
+    }
+
+    .message-row.assistant .message-bubble {
+      background: var(--bubble-assistant);
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+      border-bottom-left-radius: 3px;
+    }
+
+    .message-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .agent-tag {
+      background: #EFF6FF;
+      color: #1E40AF;
+      border: 1px solid #DBEAFE;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .intent-tag {
+      background: #F3F4F6;
+      color: #4B5563;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+    }
+
+    /* Markdown inside assistant messages */
+    .message-bubble table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0;
+      font-size: 12px;
+    }
+
+    .message-bubble th, .message-bubble td {
+      border: 1px solid #E2E8F0;
+      padding: 6px 10px;
+      text-align: left;
+    }
+
+    .message-bubble th {
+      background: #F8FAFC;
+      font-weight: 600;
+    }
+
+    .message-bubble ul, .message-bubble ol {
+      margin-left: 20px;
+      margin-top: 6px;
+      margin-bottom: 6px;
+    }
+
+    .message-bubble h3 {
+      font-size: 15px;
+      color: var(--primary);
+      margin-top: 8px;
+      margin-bottom: 4px;
+    }
+
+    .message-bubble p {
+      margin-bottom: 6px;
+    }
+
+    .message-bubble code {
+      background: #F1F5F9;
+      color: #D97706;
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: monospace;
+    }
+
+    .message-bubble pre {
+      background: #1E293B;
+      color: #F8FAFC;
+      padding: 10px;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+
+    .message-bubble pre code {
+      background: transparent;
+      color: inherit;
+    }
+
+    /* ── Typing Indicator ── */
+    .typing-indicator {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 16px;
+      background: #FFFFFF;
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      width: fit-content;
+      margin-bottom: 8px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .typing-dot {
+      width: 7px;
+      height: 7px;
+      background: var(--text-muted);
+      border-radius: 50%;
+      animation: bounce 1.4s infinite ease-in-out both;
+    }
+
+    .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+    .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+    @keyframes bounce {
+      0%, 80%, 100% { transform: scale(0); }
+      40% { transform: scale(1); }
+    }
+
+    .typing-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-left: 4px;
+    }
+
+    /* ── Input Bar ── */
+    .input-bar-container {
+      background: #FFFFFF;
+      border-top: 1px solid var(--border-color);
+      padding: 12px 20px;
+      box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.03);
+    }
+
+    .input-bar-wrapper {
+      max-width: 960px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .user-select {
+      background: #F8FAFC;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      color: var(--text-main);
+      font-weight: 500;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .chat-input {
+      flex: 1;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .chat-input:focus {
+      border-color: var(--primary-light);
+      box-shadow: 0 0 0 3px rgba(26, 68, 128, 0.1);
+    }
+
+    .btn-send {
+      background: var(--primary);
+      color: #FFFFFF;
+      border: none;
+      border-radius: 8px;
+      padding: 12px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.2s, transform 0.1s;
+    }
+
+    .btn-send:hover {
+      background: var(--primary-light);
+    }
+
+    .btn-send:disabled {
+      background: #94A3B8;
+      cursor: not-allowed;
+    }
+
+    .input-footer {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 0 4px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── Header ── -->
+  <header>
+    <div class="header-brand">
+      <i class="fa-solid fa-atom brand-icon"></i>
+      <div>
+        <div class="brand-title">G-Cortex Campus OS</div>
+        <div class="brand-subtitle">Central Intelligent Orchestrator & Multi-Agent Interface</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="session-badge" id="sessionBadge" title="Click to copy Session ID">
+        <i class="fa-solid fa-link"></i>
+        <span id="sessionIdDisplay">Session: Loading...</span>
+      </div>
+      <button class="btn-new-chat" id="btnNewChat">
+        <i class="fa-solid fa-plus"></i>
+        <span>New Conversation</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── Subagents Status Bar ── -->
+  <div class="subagents-bar">
+    <span style="font-weight:600; color:var(--text-main);"><i class="fa-solid fa-network-wired"></i> Connected Agents:</span>
+    <div class="agent-pill active">
+      <div class="agent-dot"></div>
+      <span>🎓 Course Management</span>
+    </div>
+    <div class="agent-pill active">
+      <div class="agent-dot"></div>
+      <span>🍽️ Mess Management</span>
+    </div>
+    <div class="agent-pill active">
+      <div class="agent-dot"></div>
+      <span>🏛️ Requisition Management</span>
+    </div>
+    <div class="agent-pill active" style="margin-left:auto;">
+      <i class="fa-solid fa-shield-halved" style="color:var(--accent);"></i>
+      <span>Event Bus & RBAC Active</span>
+    </div>
+  </div>
+
+  <!-- ── Chat Messages ── -->
+  <div class="chat-container" id="chatContainer">
+    <div class="welcome-card" id="welcomeCard">
+      <h2>Welcome to G-Cortex Central Orchestrator</h2>
+      <p>
+        The central AI intelligence for GIKI campus operations. Ask questions naturally, and the orchestrator
+        will automatically route your request to the specialized Course, Mess, or Requisition subagents.
+      </p>
+      <div class="prompt-chips">
+        <div class="chip" onclick="sendPrompt('What are the prerequisites for CS325?')">
+          📚 Prerequisites for CS325
+        </div>
+        <div class="chip" onclick="sendPrompt('What is on the dinner menu tonight?')">
+          🍽️ Tonight's Dinner Menu
+        </div>
+        <div class="chip" onclick="sendPrompt('Check availability for Badminton Court 1')">
+          🏸 Badminton Court Availability
+        </div>
+        <div class="chip" onclick="sendPrompt('Recommend a venue for an 80-person seminar with projector')">
+          🏛️ Recommend Seminar Venue
+        </div>
+        <div class="chip" onclick="sendPrompt('Can I take CS325 and what is for dinner?')">
+          🔄 Multi-Agent: Courses + Dining
+        </div>
+        <div class="chip" onclick="sendPrompt('What is the minimum CGPA to avoid academic probation?')">
+          📖 GIKI Academic Policy
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Typing Indicator ── -->
+  <div class="chat-container" style="padding-top:0; padding-bottom:0; flex:0;">
+    <div class="typing-indicator" id="typingIndicator">
+      <div class="typing-dot"></div>
+      <div class="typing-dot"></div>
+      <div class="typing-dot"></div>
+      <span class="typing-label" id="typingLabel">Orchestrator routing to subagent...</span>
+    </div>
+  </div>
+
+  <!-- ── Input Bar ── -->
+  <div class="input-bar-container">
+    <div class="input-bar-wrapper">
+      <div class="input-row">
+        <select class="user-select" id="userSelect" title="Select Acting Student ID">
+          <option value="2021001">Student: 2021001</option>
+          <option value="2021002">Student: 2021002</option>
+          <option value="2021003">Student: 2021003</option>
+        </select>
+        <input
+          type="text"
+          class="chat-input"
+          id="chatInput"
+          placeholder="Ask anything about courses, dining menus, sports bookings, or requisitions..."
+          autocomplete="off"
+        />
+        <button class="btn-send" id="btnSend">
+          <span>Send</span>
+          <i class="fa-solid fa-paper-plane"></i>
+        </button>
+      </div>
+      <div class="input-footer">
+        <span>G-Cortex v1.0 • Autonomous Multi-Agent Campus Operating System</span>
+        <span>Press <kbd style="background:#E2E8F0; padding:1px 4px; border-radius:3px;">Enter</kbd> to send</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentSessionId = null;
+
+    const chatContainer = document.getElementById("chatContainer");
+    const chatInput = document.getElementById("chatInput");
+    const btnSend = document.getElementById("btnSend");
+    const btnNewChat = document.getElementById("btnNewChat");
+    const sessionBadge = document.getElementById("sessionBadge");
+    const sessionIdDisplay = document.getElementById("sessionIdDisplay");
+    const userSelect = document.getElementById("userSelect");
+    const typingIndicator = document.getElementById("typingIndicator");
+    const welcomeCard = document.getElementById("welcomeCard");
+
+    // Initialize session on page load
+    async function initSession() {
+      try {
+        const res = await fetch("/api/orchestrator/session/new", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userSelect.value })
+        });
+        const data = await res.json();
+        currentSessionId = data.session_id;
+        sessionIdDisplay.innerText = "Session: " + currentSessionId.slice(0, 8) + "...";
+      } catch (err) {
+        console.error("Failed to initialize session:", err);
+        sessionIdDisplay.innerText = "Session: Error";
+      }
+    }
+
+    // Copy session ID on click
+    sessionBadge.addEventListener("click", () => {
+      if (currentSessionId) {
+        navigator.clipboard.writeText(currentSessionId);
+        const originalText = sessionIdDisplay.innerText;
+        sessionIdDisplay.innerText = "Copied ID!";
+        setTimeout(() => { sessionIdDisplay.innerText = originalText; }, 1500);
+      }
+    });
+
+    // Start New Conversation
+    btnNewChat.addEventListener("click", async () => {
+      await initSession();
+      chatContainer.innerHTML = "";
+      chatContainer.appendChild(welcomeCard);
+      chatInput.focus();
+    });
+
+    // Send Message
+    async function sendMessage() {
+      const message = chatInput.value.trim();
+      if (!message) return;
+
+      if (welcomeCard && welcomeCard.parentNode === chatContainer) {
+        welcomeCard.style.display = "none";
+      }
+
+      // Append User Bubble
+      appendMessage("user", message);
+      chatInput.value = "";
+      chatInput.disabled = true;
+      btnSend.disabled = true;
+
+      showTyping(true);
+
+      try {
+        const response = await fetch("/api/orchestrator/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: message,
+            session_id: currentSessionId,
+            user_id: userSelect.value
+          })
+        });
+
+        const data = await response.json();
+        showTyping(false);
+
+        if (!response.ok) {
+          appendMessage("assistant", "⚠️ **Error:** " + (data.detail || "Failed to process request."));
+        } else {
+          currentSessionId = data.session_id;
+          sessionIdDisplay.innerText = "Session: " + currentSessionId.slice(0, 8) + "...";
+          appendMessage("assistant", data.reply, data.routed_to_labels, data.intent);
+        }
+      } catch (err) {
+        showTyping(false);
+        appendMessage("assistant", "⚠️ **Connection Error:** Could not connect to G-Cortex orchestrator backend.");
+      } finally {
+        chatInput.disabled = false;
+        btnSend.disabled = false;
+        chatInput.focus();
+      }
+    }
+
+    function appendMessage(role, text, labels = [], intent = null) {
+      const row = document.createElement("div");
+      row.className = "message-row " + role;
+
+      const bubble = document.createElement("div");
+      bubble.className = "message-bubble";
+
+      if (role === "assistant") {
+        const meta = document.createElement("div");
+        meta.className = "message-meta";
+
+        if (labels && labels.length > 0) {
+          labels.forEach(lbl => {
+            const tag = document.createElement("span");
+            tag.className = "agent-tag";
+            tag.innerText = lbl;
+            meta.appendChild(tag);
+          });
+        } else {
+          const tag = document.createElement("span");
+          tag.className = "agent-tag";
+          tag.innerText = "🤖 Central Orchestrator";
+          meta.appendChild(tag);
+        }
+
+        if (intent) {
+          const itag = document.createElement("span");
+          itag.className = "intent-tag";
+          itag.innerText = intent.replace("_", " ");
+          meta.appendChild(itag);
+        }
+
+        bubble.appendChild(meta);
+
+        // Render Markdown
+        const contentDiv = document.createElement("div");
+        contentDiv.innerHTML = marked.parse(text);
+        bubble.appendChild(contentDiv);
+      } else {
+        bubble.innerText = text;
+      }
+
+      row.appendChild(bubble);
+      chatContainer.appendChild(row);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    function showTyping(show) {
+      typingIndicator.style.display = show ? "flex" : "none";
+      if (show) {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      }
+    }
+
+    function sendPrompt(promptText) {
+      chatInput.value = promptText;
+      sendMessage();
+    }
+
+    btnSend.addEventListener("click", sendMessage);
+    chatInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // Start session on load
+    window.addEventListener("DOMContentLoaded", () => {
+      initSession();
+      chatInput.focus();
+    });
+  </script>
+</body>
+</html>
