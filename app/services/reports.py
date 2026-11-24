@@ -1,7 +1,7 @@
 """Unified reporting dashboard. Each section is only produced for administrators holding the matching scope."""
 from app import db
 from .actor import Actor
-from . import clock, settings
+from . import billing, clock, settings
 
 
 def overview(actor: Actor) -> dict:
@@ -25,8 +25,7 @@ def overview(actor: Actor) -> dict:
     if actor.has_scope("mess"):
         out["sections"].append("mess")
         out["mess"] = {
-            "rebates": db.query_one("""SELECT COUNT(*) FILTER (WHERE status='approved') AS rebates, COALESCE(SUM(rebate_amount_pkr) FILTER (WHERE status='approved'),0)::float AS total_pkr,
-                COALESCE(SUM(days_count) FILTER (WHERE status='approved'),0) AS days FROM mess_rebates"""),
+            "billing": billing.billing_summary(actor),
             "mess_out_by_status": db.query("SELECT status, COUNT(*) AS n FROM mess_out_requests GROUP BY status ORDER BY status"),
             "attendance_14d": db.query("""SELECT meal_date::text AS day, meal_type, COUNT(*) AS n FROM mess_ledger WHERE status='consumed' AND meal_date >= CURRENT_DATE - 13
                 GROUP BY meal_date, meal_type ORDER BY meal_date, meal_type"""),
@@ -67,7 +66,7 @@ def overview(actor: Actor) -> dict:
 
 def student_dashboard(actor: Actor) -> dict:
     """Personal summary for the student home page (own data only)."""
-    from . import courses, mess, sports, equipment, notifications, requisitions
+    from . import billing, courses, mess, sports, equipment, notifications, requisitions
     uid = actor.user_id
     regs = courses.my_registrations(actor)
     tt = courses.timetable(actor)
@@ -75,7 +74,7 @@ def student_dashboard(actor: Actor) -> dict:
     upcoming = [b for b in sports.my_bookings(actor, upcoming_only=True)][:5]
     return {
         "courses": {"term": regs["term"], "count": len(regs["courses"]), "credits": regs["total_credits"], "max_credits": regs["max_credits"], "has_conflicts": tt["has_conflicts"]},
-        "mess": {"rebate_pkr": mess.rebate_ledger(actor)["total_credited_pkr"], "upcoming_mess_out": [r for r in mess.list_mess_out(actor) if r["status"] in ("pending", "approved") and r["end_date"] >= clock.today()][:3]},
+        "mess": {"bill": billing.estimate_bill(actor), "deposit": billing.deposit_summary(actor), "upcoming_mess_out": [r for r in mess.list_mess_out(actor) if r["status"] in ("pending", "approved") and r["end_date"] >= clock.today()][:3]},
         "bookings": upcoming, "quota": q,
         "equipment": equipment.my_custody(actor),
         "requisitions": [r for r in requisitions.list_requisitions(actor, "mine") if r["status"].startswith("pending")][:5],

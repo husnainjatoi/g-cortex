@@ -4,13 +4,13 @@ from . import audit
 from .actor import Actor
 from .errors import NotFound, ValidationFailed
 
-_NUMERIC = {"max_credits_per_term", "mess_daily_rate", "mess_min_days", "mess_max_days", "mess_notice_days",
+_NUMERIC = {"max_credits_per_term", "mess_deposit_amount", "mess_invoice_due_days",
             "sports_daily_quota_hours", "sports_weekly_quota_hours", "sports_open_hour", "sports_close_hour",
             "sports_advance_days", "cancel_cutoff_minutes", "checkin_grace_minutes", "strike_limit",
             "suspension_days", "equipment_max_items", "equipment_max_days", "requisition_notice_days",
             "requisition_max_hours", "requisition_max_pending", "sports_checkin_early_minutes"}
 # which admin scope may edit which setting
-_SCOPE = {"current_term": "academic", "max_credits_per_term": "academic", "drop_deadline": "academic"}
+_SCOPE = {"current_term": "academic", "max_credits_per_term": "academic", "drop_deadline": "academic", "mess_billing_mode": "mess"}
 for _k in _NUMERIC:
     if _k.startswith("mess"):
         _SCOPE[_k] = "mess"
@@ -50,6 +50,8 @@ def update(actor: Actor, key: str, value: str) -> dict:
                 raise ValueError
         except ValueError:
             raise ValidationFailed(f"{key} must be a non-negative number.")
+    if key == "mess_billing_mode" and value not in ("per_meal", "per_day"):
+        raise ValidationFailed("mess_billing_mode must be per_meal or per_day.")
     if key == "drop_deadline":
         import datetime
         try:

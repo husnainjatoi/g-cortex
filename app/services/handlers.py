@@ -1,7 +1,5 @@
 """Cross-module event handlers (the event-driven pipeline). Every handler is idempotent and runs in its own transaction."""
-import datetime
-
-from . import courses, equipment, events, mess, requisitions
+from . import billing, courses, equipment, events, mess, requisitions
 from .notifications import notify, notify_admins
 from .events import subscribe
 
@@ -17,58 +15,56 @@ def notify_course_dropped(cur, p):
     notify(cur, p["user_id"], "course", f"Dropped {p['course_code']}", f"Your {p['term']} registration was removed.", "info", "courses")
 
 
-# ── Mess: the approval drives the rebate ledger ─────────────
+# ── Mess: declarations (informational) and monthly billing ──
 @subscribe(mess.MESS_OUT_SUBMITTED)
-def mess_out_submitted(cur, p):
-    notify(cur, p["user_id"], "mess", f"Mess-out #{p['request_id']} submitted", f"{p['start_date']} to {p['end_date']} - awaiting Mess Office approval.", "info", "mess")
-    notify_admins(cur, "mess", "mess_admin", f"Mess-out #{p['request_id']} needs approval", f"Student {p['user_id']}, {p['days']} days.", "info", "admin/mess")
-
-
-@subscribe(mess.MESS_OUT_APPROVED)
-def credit_rebate_ledger(cur, p):
-    """Approved mess-out -> rebate ledger transaction + 'rebated' meal rows. Safe to run twice (unique keys)."""
-    cur.execute("SELECT start_date, end_date, days_count, est_rebate_pkr, gate_pass_synced FROM mess_out_requests WHERE request_id=%s", (p["request_id"],))
-    r = cur.fetchone()
-    cur.execute("""INSERT INTO mess_rebates (rebate_id, user_id, start_date, end_date, days_count, rebate_amount_pkr, status, gate_pass_synced, mess_out_request_id)
-                   VALUES ('REB-' || nextval('mess_rebate_seq'), %s,%s,%s,%s,%s,'approved',%s,%s) ON CONFLICT (mess_out_request_id) DO NOTHING""",
-                (p["user_id"], r["start_date"], r["end_date"], r["days_count"], r["est_rebate_pkr"], r["gate_pass_synced"], p["request_id"]))
-    credited = cur.rowcount
-    d = r["start_date"]
-    while d <= r["end_date"]:
-        for meal in mess.MEALS:
-            cur.execute("""INSERT INTO mess_ledger (user_id, meal_date, meal_type, status, source) VALUES (%s,%s,%s,'rebated','mess_out')
-                           ON CONFLICT (user_id, meal_date, meal_type, status) DO NOTHING""", (p["user_id"], d, meal))
-        d += datetime.timedelta(days=1)
-    if credited:
-        notify(cur, p["user_id"], "mess", f"Mess-out #{p['request_id']} approved",
-               f"PKR {float(r['est_rebate_pkr']):.0f} rebate credited for {r['days_count']} days.", "success", "mess")
-
-
-@subscribe(mess.MESS_OUT_REJECTED)
-def mess_out_rejected(cur, p):
-    notify(cur, p["user_id"], "mess", f"Mess-out #{p['request_id']} rejected", p.get("note") or "No reason given.", "warning", "mess")
+def mess_out_recorded(cur, p):
+    notify(cur, p["user_id"], "mess", f"Mess-out #{p['request_id']} recorded", f"{p['start_date']} to {p['end_date']}. You are billed only for meals you eat.", "info", "mess")
 
 
 @subscribe(mess.MESS_OUT_CANCELLED)
-def reverse_rebate(cur, p):
-    cur.execute("UPDATE mess_rebates SET status='reversed' WHERE mess_out_request_id=%s AND status='approved' RETURNING start_date, end_date", (p["request_id"],))
-    row = cur.fetchone()
-    if row:
-        cur.execute("DELETE FROM mess_ledger WHERE user_id=%s AND status='rebated' AND source='mess_out' AND meal_date BETWEEN %s AND %s", (p["user_id"], row["start_date"], row["end_date"]))
-    notify(cur, p["user_id"], "mess", f"Mess-out #{p['request_id']} cancelled", "Any credited rebate has been reversed." if row else "", "info", "mess")
+def mess_out_cancelled(cur, p):
+    notify(cur, p["user_id"], "mess", f"Mess-out #{p['request_id']} cancelled", "", "info", "mess")
 
 
-@subscribe(mess.GATE_PASS_SYNCED)
-def approve_pending_covered_by_gate_pass(cur, p):
-    """Gate-pass synchronisation: pending mess-outs fully covered by a newly synced approved pass are auto-approved."""
-    if not p["approved"]:
-        return
-    cur.execute("""SELECT request_id, start_date, end_date, days_count, est_rebate_pkr FROM mess_out_requests WHERE user_id=%s AND status='pending'
-                   AND start_date >= %s AND end_date <= %s FOR UPDATE""", (p["user_id"], p["leave_start"], p["leave_end"]))
-    for r in cur.fetchall():
-        cur.execute("UPDATE mess_out_requests SET status='approved', gate_pass_synced=TRUE, decided_at=now(), decision_note='Auto-approved: gate-pass synchronised' WHERE request_id=%s", (r["request_id"],))
-        payload = {"request_id": r["request_id"], "user_id": p["user_id"]}
-        credit_rebate_ledger(cur, payload)
+@subscribe(billing.BILL_INVOICE_GENERATED)
+def invoice_generated(cur, p):
+    notify(cur, p["user_id"], "billing", f"Mess invoice {p['invoice_no']} for {p['month']}", f"PKR {p['amount_pkr']:.2f} due by {p['due_date']}. Generate a challan from the Mess page.", "info", "mess")
+
+
+@subscribe(billing.BILL_PAYMENT_SUBMITTED)
+def payment_submitted(cur, p):
+    notify(cur, p["user_id"], "billing", f"Receipt submitted for {p['invoice_no']}", f"PKR {p['amount_pkr']:.2f} awaiting Mess Office verification.", "info", "mess")
+    notify_admins(cur, "mess", "billing_admin", f"Payment to verify: {p['invoice_no']}", f"Student {p['user_id']} submitted PKR {p['amount_pkr']:.2f}.", "info", "admin/mess")
+
+
+@subscribe(billing.BILL_PAYMENT_VERIFIED)
+def payment_verified(cur, p):
+    notify(cur, p["user_id"], "billing", f"Payment verified: {p['invoice_no']}", f"PKR {p['amount_pkr']:.2f} accepted. Invoice is now {p['invoice_status']}.", "success", "mess")
+
+
+@subscribe(billing.BILL_PAYMENT_REJECTED)
+def payment_rejected(cur, p):
+    notify(cur, p["user_id"], "billing", f"Payment rejected: {p['invoice_no']}", p.get("note") or "The receipt could not be verified.", "warning", "mess")
+
+
+@subscribe(billing.BILL_INVOICE_ADJUSTED)
+def invoice_adjusted(cur, p):
+    notify(cur, p["user_id"], "billing", f"Invoice {p['invoice_no']} adjusted", f"PKR {p['amount_pkr']:+.2f}: {p['reason']}", "info", "mess")
+
+
+@subscribe(billing.DEPOSIT_RECORDED)
+def deposit_recorded(cur, p):
+    notify(cur, p["user_id"], "billing", f"Security deposit payment {p['status']}", f"PKR {p['amount_pkr']:.2f}", "success" if p["status"] == "verified" else "info", "mess")
+
+
+@subscribe(billing.CLEARANCE_UPDATED)
+def clearance_updated(cur, p):
+    msg = {"requested": "Your final mess clearance request was received.", "approved": "Your clearance was approved; settlement is next.",
+           "rejected": "Your clearance request was rejected. " + (p.get("note") or ""), "settled": f"Settlement recorded: refundable PKR {p.get('refundable_pkr', 0):.2f}, additional dues PKR {p.get('additional_due_pkr', 0):.2f}.",
+           "returned": "Your refundable security deposit has been returned."}[p["status"]]
+    notify(cur, p["user_id"], "billing", f"Mess clearance {p['status']}", msg, "info", "mess")
+    if p["status"] == "requested":
+        notify_admins(cur, "mess", "clearance_admin", "Mess clearance to review", f"Student {p['user_id']}", "info", "admin/mess")
 
 
 # ── Requisitions ────────────────────────────────────────────

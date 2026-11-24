@@ -137,10 +137,12 @@ def test_settings_scoped_updates(actors):
     with pytest.raises(Forbidden):
         settings.update(actors["mess"], "max_credits_per_term", "20")
     with pytest.raises(ValidationFailed):
-        settings.update(actors["mess"], "mess_daily_rate", "abc")
-    settings.update(actors["mess"], "mess_daily_rate", "500")
-    assert settings.get_quick("mess_daily_rate") == 500
-    settings.update(actors["mess"], "mess_daily_rate", "450")
+        settings.update(actors["mess"], "mess_deposit_amount", "abc")
+    with pytest.raises(ValidationFailed):
+        settings.update(actors["mess"], "mess_billing_mode", "prepaid")
+    settings.update(actors["mess"], "mess_invoice_due_days", "14")
+    assert settings.get_quick("mess_invoice_due_days") == 14
+    settings.update(actors["mess"], "mess_invoice_due_days", "10")
 
 
 def test_reports_are_scope_filtered(actors, at):

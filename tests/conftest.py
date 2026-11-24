@@ -84,7 +84,8 @@ def reset_state():
     from app import db
     with db.tx() as cur:
         cur.execute("""TRUNCATE enrollments, mess_out_requests, mess_qr_redemptions, notifications, domain_events, bookings,
-                       society_requisitions, equipment_custody_log, assistant_pending_actions, mess_ledger, event_handler_runs RESTART IDENTITY CASCADE""")
+                       society_requisitions, equipment_custody_log, assistant_pending_actions, mess_ledger, event_handler_runs,
+                       mess_payments, mess_challans, mess_invoice_adjustments, mess_invoices, mess_deposit_transactions, mess_deposit_accounts, mess_clearances, mess_rates RESTART IDENTITY CASCADE""")
         cur.execute("DELETE FROM mess_rebates")
         cur.execute("DELETE FROM gate_passes")
         cur.execute("UPDATE no_show_records SET strikes=0, suspended=false, suspended_until=NULL, strike_history='[]'")
@@ -96,6 +97,8 @@ def reset_state():
         cur.execute("UPDATE system_settings SET value='2027-01-15' WHERE key='drop_deadline'")
         cur.execute("UPDATE courses SET is_active=true, capacity=60 WHERE course_code NOT IN ('CS330','CS412')")
         cur.execute("UPDATE student_profiles SET allergies='none'")
+        cur.execute("UPDATE system_settings SET value='per_meal' WHERE key='mess_billing_mode'")
+        cur.execute("UPDATE system_settings SET value='0' WHERE key='mess_deposit_amount'")
         cur.execute("DELETE FROM mess_totp_secrets")
     yield
 

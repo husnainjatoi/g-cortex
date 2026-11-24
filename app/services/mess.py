@@ -1,4 +1,6 @@
-"""Mess Management business logic: mess-out requests, rebate ledger, TOTP QR entry, menu/macros, forecasting."""
+"""Mess Management business logic: TOTP QR entry, meal records, menu/macros/allergens, mess-out declarations, forecasting.
+
+Monthly billing and the security deposit live in app/services/billing.py. The rebate model has been retired."""
 import base64
 import datetime
 import hashlib
@@ -14,8 +16,8 @@ from .audit import op
 from .errors import Conflict, Forbidden, NotFound, RuleViolation, ValidationFailed
 
 MESS_OUT_SUBMITTED = "mess.out_submitted"
-MESS_OUT_APPROVED = "mess.out_approved"
-MESS_OUT_REJECTED = "mess.out_rejected"
+MESS_OUT_APPROVED = "mess.out_approved"      # legacy event type (history only)
+MESS_OUT_REJECTED = "mess.out_rejected"      # legacy event type (history only)
 MESS_OUT_CANCELLED = "mess.out_cancelled"
 MESS_ENTRY_LOGGED = "mess.entry_logged"
 GATE_PASS_SYNCED = "mess.gate_pass_synced"
@@ -107,37 +109,27 @@ def update_menu(actor: Actor, meal_period: str, items: str, calories: int, prote
     return {"ok": True, "meal_period": meal}
 
 
-# ── Mess-out requests and rebate calculation ────────────────
+# ── Mess-out declarations (kitchen planning only - NO financial effect) ──
+# Billing is based solely on verified meal consumption, so a declared absence changes no charges. Declarations help the
+# kitchen forecast headcount. The legacy rebate model has been retired.
 
-def _evaluate(cur, user_id: str, start, end, *, ignore_notice: bool = False) -> dict:
+def _evaluate(cur, user_id: str, start, end) -> dict:
     s, e = clock.parse_date(start, "Start date"), clock.parse_date(end, "End date")
-    problems: list[str] = []
     if e < s:
         raise ValidationFailed("End date must be on or after the start date.")
     days = (e - s).days + 1
-    rate, min_days, max_days, notice = (settings.get(cur, k) for k in ("mess_daily_rate", "mess_min_days", "mess_max_days", "mess_notice_days"))
-    if days < min_days:
-        problems.append(f"A mess-out must cover at least {min_days} consecutive days (you asked for {days}).")
-    if days > max_days:
-        problems.append(f"A mess-out cannot exceed {max_days} days.")
-    earliest = clock.today() + datetime.timedelta(days=notice)
-    if not ignore_notice and s < earliest:
-        problems.append(f"Mess-out requests need {notice} day(s) notice: the earliest start date is {earliest.isoformat()}.")
-    cur.execute("""SELECT request_id, start_date, end_date, status FROM mess_out_requests
-                   WHERE user_id=%s AND status IN ('pending','approved') AND daterange(start_date,end_date,'[]') && daterange(%s,%s,'[]')""",
-                (user_id, s, e))
+    problems: list[str] = []
+    if days > 120:
+        problems.append("A mess-out declaration cannot exceed 120 days.")
+    if e < clock.today():
+        problems.append("The dates are in the past.")
+    cur.execute("""SELECT request_id, start_date, end_date FROM mess_out_requests WHERE user_id=%s AND status IN ('pending','approved')
+                   AND daterange(start_date,end_date,'[]') && daterange(%s,%s,'[]')""", (user_id, s, e))
     clash = cur.fetchone()
     if clash:
-        problems.append(f"Overlaps your {clash['status']} mess-out #{clash['request_id']} ({clash['start_date']} to {clash['end_date']}).")
-    cur.execute("""SELECT gate_pass_id, destination FROM gate_passes WHERE user_id=%s AND approved
-                   AND leave_start <= %s AND leave_end >= %s LIMIT 1""", (user_id, s, e))
-    gp = cur.fetchone()
-    return {"start_date": s.isoformat(), "end_date": e.isoformat(), "days": days, "daily_rate_pkr": rate,
-            "rebate_pkr": round(days * rate, 2), "eligible": not problems, "problems": problems,
-            "gate_pass_verified": bool(gp), "gate_pass_destination": gp["destination"] if gp else None,
-            "outcome_if_submitted": ("approved automatically (matching security gate-pass on file)" if gp else
-                                     "pending approval by the Mess Office"),
-            "earliest_start_date": earliest.isoformat()}
+        problems.append(f"Overlaps your existing mess-out #{clash['request_id']} ({clash['start_date']} to {clash['end_date']}).")
+    return {"start_date": s.isoformat(), "end_date": e.isoformat(), "days": days, "eligible": not problems, "problems": problems,
+            "note": "A mess-out only tells the kitchen you will be away. You are billed solely for meals you actually eat."}
 
 
 def preview_mess_out(actor: Actor, start_date: str, end_date: str, student_id: str | None = None) -> dict:
@@ -153,31 +145,26 @@ def submit_mess_out(actor: Actor, start_date: str, end_date: str, reason: str | 
     reason = (reason or "").strip()[:255] or None
     with db.tx() as cur:
         _student(cur, sid)
-        cur.execute("SELECT 1 FROM users WHERE user_id=%s FOR UPDATE", (sid,))  # serialise a student's own submissions
+        cur.execute("SELECT 1 FROM users WHERE user_id=%s FOR UPDATE", (sid,))
         ev = _evaluate(cur, sid, start_date, end_date)
         if not ev["eligible"]:
             raise RuleViolation(" ".join(ev["problems"]), code="mess_out_rejected", details={"problems": ev["problems"]})
-        auto = ev["gate_pass_verified"]
         try:
             cur.execute("SAVEPOINT ins")
-            cur.execute("""INSERT INTO mess_out_requests (user_id, start_date, end_date, days_count, reason, status, est_rebate_pkr,
-                           gate_pass_synced, channel, decided_at, decision_note)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING request_id""",
-                        (sid, ev["start_date"], ev["end_date"], ev["days"], reason, "approved" if auto else "pending", ev["rebate_pkr"],
-                         auto, actor.channel, clock.now() if auto else None, "Auto-approved via gate-pass synchronisation" if auto else None))
-        except Exception as exc:  # exclusion constraint = lost a race against a concurrent overlapping request
+            cur.execute("""INSERT INTO mess_out_requests (user_id, start_date, end_date, days_count, reason, status, est_rebate_pkr, channel, decided_at, decision_note)
+                           VALUES (%s,%s,%s,%s,%s,'approved',NULL,%s,now(),'Recorded (no approval needed; no billing effect)') RETURNING request_id""",
+                        (sid, ev["start_date"], ev["end_date"], ev["days"], reason, actor.channel))
+        except Exception as exc:
             if getattr(exc, "pgcode", None) == "23P01":
                 cur.execute("ROLLBACK TO SAVEPOINT ins")
-                raise Conflict("You already have a mess-out request covering these dates.")
+                raise Conflict("You already have a mess-out covering these dates.")
             raise
         rid = cur.fetchone()["request_id"]
-        payload = {"request_id": rid, "user_id": sid, "start_date": ev["start_date"], "end_date": ev["end_date"],
-                   "days": ev["days"], "rebate_pkr": ev["rebate_pkr"]}
-        audit.log(cur, actor, "mess.out_submit", "mess_out", rid, detail={**payload, "auto_approved": auto})
-        events.emit(cur, MESS_OUT_APPROVED if auto else MESS_OUT_SUBMITTED, payload)
-        return {"ok": True, "request_id": rid, "status": "approved" if auto else "pending", **ev,
-                "message": (f"Mess-out #{rid} approved ({ev['days']} days). Rebate of PKR {ev['rebate_pkr']:.0f} credited to your ledger."
-                            if auto else f"Mess-out #{rid} submitted for Mess Office approval ({ev['days']} days, estimated rebate PKR {ev['rebate_pkr']:.0f}).")}
+        payload = {"request_id": rid, "user_id": sid, "start_date": ev["start_date"], "end_date": ev["end_date"], "days": ev["days"]}
+        audit.log(cur, actor, "mess.out_submit", "mess_out", rid, detail=payload)
+        events.emit(cur, MESS_OUT_SUBMITTED, payload)
+        return {"ok": True, "request_id": rid, "status": "recorded", **ev,
+                "message": f"Mess-out #{rid} recorded for {ev['start_date']} to {ev['end_date']} ({ev['days']} days). It does not change your bill; you pay only for meals you eat."}
 
 
 @op("mess.out_cancel", "mess_out", "request_id")
@@ -186,37 +173,17 @@ def cancel_mess_out(actor: Actor, request_id: int, student_id: str | None = None
         cur.execute("SELECT * FROM mess_out_requests WHERE request_id=%s FOR UPDATE", (request_id,))
         r = cur.fetchone()
         if not r:
-            raise NotFound("Mess-out request not found.")
+            raise NotFound("Mess-out record not found.")
         if r["user_id"] != actor.user_id and not actor.has_scope("mess"):
-            raise Forbidden("You can only cancel your own mess-out requests.")
+            raise Forbidden("You can only cancel your own mess-out records.")
         if r["status"] not in ("pending", "approved"):
-            raise RuleViolation(f"A {r['status']} request cannot be cancelled.")
+            raise RuleViolation(f"A {r['status']} record cannot be cancelled.")
         if r["start_date"] <= clock.today():
             raise RuleViolation("This mess-out has already started and can no longer be cancelled.")
         cur.execute("UPDATE mess_out_requests SET status='cancelled', decided_at=now(), decided_by=%s WHERE request_id=%s", (actor.user_id, request_id))
         audit.log(cur, actor, "mess.out_cancel", "mess_out", request_id)
-        events.emit(cur, MESS_OUT_CANCELLED, {"request_id": request_id, "user_id": r["user_id"], "was_approved": r["status"] == "approved"})
+        events.emit(cur, MESS_OUT_CANCELLED, {"request_id": request_id, "user_id": r["user_id"]})
     return {"ok": True, "request_id": request_id, "status": "cancelled", "message": f"Mess-out #{request_id} cancelled."}
-
-
-@op("mess.out_decide", "mess_out", "request_id")
-def decide_mess_out(actor: Actor, request_id: int, approve: bool, note: str | None = None) -> dict:
-    actor.require_scope("mess")
-    with db.tx() as cur:
-        cur.execute("SELECT * FROM mess_out_requests WHERE request_id=%s FOR UPDATE", (request_id,))
-        r = cur.fetchone()
-        if not r:
-            raise NotFound("Mess-out request not found.")
-        if r["status"] != "pending":
-            raise RuleViolation(f"Request #{request_id} is already {r['status']}.")
-        status = "approved" if approve else "rejected"
-        cur.execute("UPDATE mess_out_requests SET status=%s, decided_by=%s, decided_at=now(), decision_note=%s WHERE request_id=%s",
-                    (status, actor.user_id, (note or "")[:255] or None, request_id))
-        payload = {"request_id": request_id, "user_id": r["user_id"], "start_date": r["start_date"], "end_date": r["end_date"],
-                   "days": r["days_count"], "rebate_pkr": r["est_rebate_pkr"], "note": note}
-        audit.log(cur, actor, "mess.out_decide", "mess_out", request_id, detail={"decision": status, "note": note})
-        events.emit(cur, MESS_OUT_APPROVED if approve else MESS_OUT_REJECTED, payload)
-    return {"ok": True, "request_id": request_id, "status": status}
 
 
 def list_mess_out(actor: Actor, student_id: str | None = None, status: str | None = None, all_students: bool = False) -> list[dict]:
@@ -228,24 +195,13 @@ def list_mess_out(actor: Actor, student_id: str | None = None, status: str | Non
     if status:
         where.append("r.status=%s"); params.append(status)
     rows = db.query(
-        f"""SELECT r.*, u.full_name, reb.rebate_id, reb.rebate_amount_pkr AS credited_pkr,
+        f"""SELECT r.request_id, r.user_id, u.full_name, r.start_date, r.end_date, r.days_count, r.reason, r.status, r.channel, r.created_at,
                    CASE WHEN r.status='approved' AND r.end_date < CURRENT_DATE THEN 'past'
                         WHEN r.status='approved' AND r.start_date <= CURRENT_DATE THEN 'ongoing'
                         WHEN r.status='approved' THEN 'upcoming' END AS phase
-            FROM mess_out_requests r JOIN users u USING (user_id) LEFT JOIN mess_rebates reb ON reb.mess_out_request_id = r.request_id
+            FROM mess_out_requests r JOIN users u USING (user_id)
             {('WHERE ' + ' AND '.join(where)) if where else ''} ORDER BY r.start_date DESC, r.request_id DESC LIMIT 200""", params)
-    for r in rows:
-        r.pop("span", None)
     return rows
-
-
-def rebate_ledger(actor: Actor, student_id: str | None = None) -> dict:
-    sid = actor.resolve_student(student_id, "mess")
-    rows = db.query("""SELECT rebate_id, start_date, end_date, days_count, rebate_amount_pkr, status, gate_pass_synced, applied_at, mess_out_request_id
-                       FROM mess_rebates WHERE user_id=%s ORDER BY applied_at DESC, rebate_id DESC""", (sid,))
-    credited = sum(float(r["rebate_amount_pkr"]) for r in rows if r["status"] == "approved")
-    return {"student_id": sid, "transactions": rows, "total_credited_pkr": credited,
-            "total_days": sum(r["days_count"] for r in rows if r["status"] == "approved")}
 
 
 def my_gate_passes(actor: Actor, student_id: str | None = None) -> list[dict]:
@@ -312,11 +268,6 @@ def _qr_svg(text: str) -> str:
     return buf.getvalue().decode()
 
 
-def _active_mess_out(cur, user_id: str, day: datetime.date) -> dict | None:
-    cur.execute("SELECT request_id, start_date, end_date FROM mess_out_requests WHERE user_id=%s AND status='approved' AND %s BETWEEN start_date AND end_date", (user_id, day))
-    return cur.fetchone()
-
-
 @op("mess.qr_generate", "qr", "meal")
 def generate_qr(actor: Actor, meal: str | None = None, student_id: str | None = None) -> dict:
     sid = actor.resolve_student(student_id, "mess")
@@ -326,9 +277,6 @@ def generate_qr(actor: Actor, meal: str | None = None, student_id: str | None = 
         cur.execute("SELECT 1 FROM daily_menu WHERE meal_period=%s", (meal,))
         if not cur.fetchone():
             raise NotFound("That meal is not served.")
-        away = _active_mess_out(cur, sid, clock.today())
-        if away:
-            raise RuleViolation(f"You are on an approved mess-out until {away['end_date']}; dining entry is suspended.")
         now = clock.now().timestamp()
         step = int(now // TOTP_STEP)
         code = _hotp(_secret(cur, sid), step)
@@ -373,9 +321,6 @@ def verify_entry(actor: Actor | None, payload: str, meal: str | None = None, gat
                     break
         if matched is None:
             reject("Invalid or expired QR code.", uid)
-        away = _active_mess_out(cur, uid, clock.today())
-        if away:
-            reject(f"Active mess-out #{away['request_id']} until {away['end_date']}: dining access suspended.", uid)
         cur.execute("INSERT INTO mess_qr_redemptions (user_id, meal, step) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING", (uid, meal, matched))
         if cur.rowcount == 0:
             reject("This QR code was already used (replay blocked).", uid)
@@ -406,19 +351,19 @@ def meal_records(actor: Actor, student_id: str | None = None, days: int = 30) ->
             d[k] += r[k] or 0
         d["meals"] += 1
     return {"student_id": sid, "records": rows, "daily_nutrition": sorted(daily.values(), key=lambda x: x["date"], reverse=True),
-            "summary": {"meals_consumed": len(consumed), "meals_rebated": sum(1 for r in rows if r["status"] == "rebated"),
+            "summary": {"meals_consumed": len(consumed),
                         "avg_daily_calories": round(sum(d["calories"] for d in daily.values()) / len(daily)) if daily else 0}}
 
 
 def profile(actor: Actor, student_id: str | None = None) -> dict:
     sid = actor.resolve_student(student_id, "mess")
-    led = rebate_ledger(actor, sid)
-    mo = [r for r in list_mess_out(actor, sid) if r["status"] in ("pending", "approved")]
+    from . import billing
+    est = billing.estimate_bill(actor, sid)
     prof = db.query_one("SELECT allergies FROM student_profiles WHERE user_id=%s", (sid,))
-    cfg = db.query("SELECT key, value FROM system_settings WHERE key LIKE 'mess_%%'")
-    return {"student_id": sid, "allergies": (prof or {}).get("allergies", "none"),
-            "gate_passes": my_gate_passes(actor, sid), "mess_out_requests": mo, "total_rebate_credited_pkr": led["total_credited_pkr"],
-            "rules": {r["key"]: r["value"] for r in cfg}}
+    return {"student_id": sid, "allergies": (prof or {}).get("allergies", "none"), "gate_passes": my_gate_passes(actor, sid),
+            "mess_out_records": [r for r in list_mess_out(actor, sid) if r["status"] in ("pending", "approved")],
+            "current_month": {"month": est["month"], "kind": est["kind"], "days_consumed": est["days_consumed"], "amount_pkr": est["amount_pkr"]},
+            "outstanding_bills_pkr": est["outstanding_total_pkr"]}
 
 
 def attendance(actor: Actor, date: str | None = None, meal: str | None = None) -> dict:
@@ -467,11 +412,3 @@ def forecast(actor: Actor, meal: str, date: str | None = None, day_type: str | N
             "predicted_headcount": predicted, "recommended_production": buffer, "method": method,
             "estimated_overproduction_avoided_pct": round(100 * (total - buffer) / total, 1) if total else 0,
             "note": "Statistical forecast from ledger data; accuracy improves as turnstile history accumulates."}
-
-
-def rebate_summary(actor: Actor) -> dict:
-    actor.require_scope("mess")
-    row = db.query_one("""SELECT COUNT(*) FILTER (WHERE status='approved') AS approved, COALESCE(SUM(rebate_amount_pkr) FILTER (WHERE status='approved'),0) AS total_pkr,
-                          COALESCE(SUM(days_count) FILTER (WHERE status='approved'),0) AS total_days FROM mess_rebates""")
-    pend = db.query_one("SELECT COUNT(*) AS n FROM mess_out_requests WHERE status='pending'")["n"]
-    return {**row, "total_pkr": float(row["total_pkr"]), "pending_requests": pend}

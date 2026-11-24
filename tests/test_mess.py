@@ -5,61 +5,12 @@ from app.services import clock, events, mess
 from app.services.errors import Forbidden, RuleViolation, ValidationFailed
 
 
-def test_preview_enforces_notice_min_days_and_calculates_rebate(actors, at):
-    s1 = actors["s1"]
-    ok = mess.preview_mess_out(s1, "2026-11-28", "2026-11-30")
-    assert ok["eligible"] and ok["days"] == 3 and ok["rebate_pkr"] == 1350.0
-    assert not mess.preview_mess_out(s1, "2026-11-25", "2026-11-27")["eligible"]       # no notice
-    assert not mess.preview_mess_out(s1, "2026-11-28", "2026-11-28")["eligible"]       # < 2 days
-    with pytest.raises(ValidationFailed):
-        mess.preview_mess_out(s1, "2026-12-05", "2026-12-01")
-    with pytest.raises(ValidationFailed):
-        mess.preview_mess_out(s1, "not-a-date", "2026-12-01")
 
 
-def test_submit_pending_then_admin_approval_credits_ledger(actors, at):
-    s1 = actors["s1"]
-    r = mess.submit_mess_out(s1, "2026-11-28", "2026-11-30", "going home")
-    assert r["status"] == "pending"
-    assert db.query_one("SELECT COUNT(*) AS n FROM mess_rebates WHERE user_id='2024405'")["n"] == 0
-    with pytest.raises(Forbidden):
-        mess.decide_mess_out(s1, r["request_id"], True)                  # students cannot approve
-    mess.decide_mess_out(actors["mess"], r["request_id"], True, "ok")
-    led = mess.rebate_ledger(s1)
-    assert led["total_credited_pkr"] == 1350.0 and led["transactions"][0]["mess_out_request_id"] == r["request_id"]
-    assert db.query_one("SELECT COUNT(*) AS n FROM mess_ledger WHERE user_id='2024405' AND status='rebated'")["n"] == 9   # 3 days x 3 meals
-    assert any("approved" in n["title"] for n in db.query("SELECT title FROM notifications WHERE user_id='2024405'"))
-    with pytest.raises(RuleViolation):
-        mess.decide_mess_out(actors["mess"], r["request_id"], False)     # cannot decide twice
 
 
-def test_gate_pass_sync_auto_approves(actors, at):
-    mess.sync_gate_pass(actors["mess"], "2024668", "2026-11-27", "2026-12-02", "Lahore", external_ref="GP-1")
-    r = mess.submit_mess_out(actors["s2"], "2026-11-28", "2026-11-30")
-    assert r["status"] == "approved" and r["gate_pass_verified"]
-    assert mess.rebate_ledger(actors["s2"])["total_credited_pkr"] == 1350.0
 
-
-def test_gate_pass_arriving_later_approves_pending(actors, at):
-    r = mess.submit_mess_out(actors["s2"], "2026-12-01", "2026-12-03")
-    assert r["status"] == "pending"
-    mess.sync_gate_pass(None, "2024668", "2026-11-30", "2026-12-05", approved=True, external_ref="GP-2") if False else \
-        mess.sync_gate_pass(actors["mess"], "2024668", "2026-11-30", "2026-12-05", approved=True, external_ref="GP-2")
-    assert mess.list_mess_out(actors["s2"])[0]["status"] == "approved"
-    assert mess.rebate_ledger(actors["s2"])["total_credited_pkr"] == 1350.0
-
-
-def test_rebate_event_handler_is_idempotent(actors, at):
-    r = mess.submit_mess_out(actors["s1"], "2026-11-28", "2026-11-29")
-    mess.decide_mess_out(actors["mess"], r["request_id"], True)
-    ev = db.query_one("SELECT event_id FROM domain_events WHERE event_type='mess.out_approved'")
-    events.dispatch(str(ev["event_id"]))         # duplicate delivery
-    events.dispatch(str(ev["event_id"]))
-    assert db.query_one("SELECT COUNT(*) AS n FROM mess_rebates WHERE mess_out_request_id=%s", (r["request_id"],))["n"] == 1
-    assert db.query_one("SELECT COUNT(*) AS n FROM mess_ledger WHERE status='rebated'")["n"] == 6
-
-
-def test_overlapping_requests_rejected(actors, at):
+def test_overlapping_declarations_rejected(actors, at):
     mess.submit_mess_out(actors["s1"], "2026-11-28", "2026-11-30")
     with pytest.raises(RuleViolation):
         mess.submit_mess_out(actors["s1"], "2026-11-30", "2026-12-02")
@@ -80,19 +31,10 @@ def test_concurrent_duplicate_submissions_create_one_request(actors, at):
     assert db.query_one("SELECT COUNT(*) AS n FROM mess_out_requests")["n"] == 1
 
 
-def test_cancel_reverses_rebate(actors, at):
-    r = mess.submit_mess_out(actors["s1"], "2026-11-28", "2026-11-29")
-    mess.decide_mess_out(actors["mess"], r["request_id"], True)
-    mess.cancel_mess_out(actors["s1"], r["request_id"])
-    assert mess.rebate_ledger(actors["s1"])["total_credited_pkr"] == 0
-    assert db.query_one("SELECT COUNT(*) AS n FROM mess_ledger WHERE status='rebated'")["n"] == 0
-    with pytest.raises(Forbidden):
-        mess.cancel_mess_out(actors["s2"], r["request_id"])
-
 
 def test_cannot_read_or_act_for_other_students(actors, at):
     with pytest.raises(Forbidden):
-        mess.rebate_ledger(actors["s1"], "2024668")
+        mess.profile(actors["s1"], "2024668")
     with pytest.raises(Forbidden):
         mess.submit_mess_out(actors["s1"], "2026-11-28", "2026-11-30", student_id="2024668")
     with pytest.raises(Forbidden):
@@ -129,14 +71,6 @@ def test_qr_rejects_wrong_code_expired_and_wrong_meal(actors, at):
     with pytest.raises(RuleViolation):
         mess.verify_entry(actors["mess"], "garbage", "lunch")
 
-
-def test_no_entry_or_qr_during_approved_mess_out(actors, at):
-    qr = mess.generate_qr(actors["s1"], "dinner")       # valid now
-    r = mess.submit_mess_out(actors["s1"], "2026-11-26", "2026-11-28")
-    mess.decide_mess_out(actors["mess"], r["request_id"], True)
-    at(2026, 11, 27, 18, 0)
-    with pytest.raises(RuleViolation):
-        mess.generate_qr(actors["s1"], "dinner")
 
 
 def test_gate_key_path_for_turnstile_controller(actors, at):
@@ -177,7 +111,6 @@ def test_forecast_uses_ledger_and_mess_outs(actors, at):
         mess.forecast(actors["s1"], "lunch")
     base = mess.forecast(actors["mess"], "lunch", "2026-12-02")
     assert base["predicted_headcount"] > 0
-    r = mess.submit_mess_out(actors["s1"], "2026-12-01", "2026-12-04")
-    mess.decide_mess_out(actors["mess"], r["request_id"], True)
+    mess.submit_mess_out(actors["s1"], "2026-12-01", "2026-12-04")
     after = mess.forecast(actors["mess"], "lunch", "2026-12-02")
     assert after["approved_mess_outs"] == 1 and after["predicted_headcount"] <= base["predicted_headcount"]

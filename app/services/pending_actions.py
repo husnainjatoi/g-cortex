@@ -8,7 +8,7 @@ import datetime
 import json
 
 from app import db
-from . import audit, clock, courses, equipment, mess, requisitions, sports
+from . import audit, billing, clock, courses, equipment, mess, requisitions, sports
 from .actor import Actor
 from .errors import Forbidden, NotFound, RuleViolation, ServiceError
 
@@ -57,7 +57,18 @@ def _v_cancel_req(a, args, res):
     return None if requisitions.get_requisition(a, res["requisition_id"])["status"] == "cancelled" else "requisition not cancelled"
 
 
+def _v_payment(a, args, res):
+    return None if any(p["payment_id"] == res["payment_id"] for p in billing.list_payments(a, None)) else "receipt not found after execution"
+
+
+def _v_clearance(a, args, res):
+    c = billing.deposit_summary(a)["clearance"]
+    return None if c and c["clearance_id"] == res["clearance_id"] else "clearance not found after execution"
+
+
 EXECUTORS = {
+    "submit_mess_payment_receipt": (lambda a, **k: billing.submit_payment(a, k["invoice_no"], k["amount_pkr"], k["reference"]), _v_payment),
+    "request_mess_clearance": (lambda a, **k: billing.request_clearance(a), _v_clearance),
     "register_for_course": (lambda a, **k: courses.register(a, k["course_code"]), _v_register),
     "drop_course": (lambda a, **k: courses.drop(a, k["course_code"]), _v_drop),
     "submit_mess_out_request": (lambda a, **k: mess.submit_mess_out(a, k["start_date"], k["end_date"], k.get("reason")), _v_mess_out),
