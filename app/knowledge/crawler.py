@@ -139,7 +139,7 @@ class OfficialFetcher:
 def extract_html(content: bytes) -> tuple[str, str, list[str]]:
     """-> (title, main text, same-site links). Only the page-builder body is kept (menus/footers are dropped)."""
     import html as htmllib
-    s = content.decode("utf-8", errors="ignore")
+    s = content.decode("utf-8", errors="ignore").replace("\x00", " ")
     tm = re.search(r"<title>(.*?)</title>", s, re.S | re.I)
     title = re.sub(r"\s*[-–|]\s*Ghulam Ishaq Khan Institute.*$", "", htmllib.unescape(tm.group(1)).strip()) if tm else ""
     i = s.find("gdlr-core-page-builder-body")
@@ -162,4 +162,5 @@ def extract_pdf(content: bytes) -> tuple[str, str, int]:
     r = PdfReader(io.BytesIO(content))
     meta = (r.metadata.title if r.metadata and r.metadata.title else "") or ""
     pages = [f"\n<<PAGE {i + 1}>>\n" + (p.extract_text() or "") for i, p in enumerate(r.pages)]
-    return meta.strip(), "".join(pages), len(r.pages)
+    clean = lambda t: re.sub(r"[\x00\ufffe\uffff]", " ", t)          # PostgreSQL cannot store NUL characters
+    return clean(meta).strip(), clean("".join(pages)), len(r.pages)

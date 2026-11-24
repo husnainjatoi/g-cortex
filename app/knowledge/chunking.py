@@ -13,7 +13,7 @@ def content_hash(text: str) -> str:
 
 
 def _clean(s: str) -> str:
-    s = re.sub(r"[\x00-\x08\x0b-\x1f]", " ", s)
+    s = re.sub(r"[\x00-\x08\x0b-\x1f\ufffe\uffff]", " ", s)
     s = re.sub(r"UNDERGRADUATE PROSPECTUS \d{4}(UNDERGRADUATE PROSPECTUS \d{4})?", " ", s)
     return re.sub(r"[ \t\xa0]+", " ", s)
 

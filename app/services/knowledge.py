@@ -111,7 +111,7 @@ def ingest_url(fetcher, url: str, force: bool = False) -> dict:
         return {"url": url, "result": "no_text"}
     existing = {r["content_hash"]: r["chunk_id"] for r in db.query("SELECT content_hash, chunk_id FROM knowledge_chunks WHERE content_hash = ANY(%s)", ([c["content_hash"] for c in chunks],))}
     new = [c for c in chunks if c["content_hash"] not in existing]
-    vectors = embeddings.embed([c["content"] for c in new]) if new else []
+    vectors: list = []                                    # vectors are back-filled in committed batches (resumable, rate-limit friendly)
     added = removed = 0
     with db.tx() as cur:
         sid = _upsert_source(cur, url, title=title, doc_type=doc_type, content_hash=h, etag=f.etag, last_modified=f.last_modified, http_status=200, byte_size=len(f.content),
@@ -129,21 +129,25 @@ def ingest_url(fetcher, url: str, force: bool = False) -> dict:
                                VALUES (%s,%s,%s,%s,%s,%s,%s::vector) ON CONFLICT (content_hash) DO NOTHING""",
                             (sid, idx, c["section"], c["page_from"], c["content"], c["content_hash"], embeddings.to_pg(vec) if vec else None))
                 added += cur.rowcount
-    return {"url": url, "result": "updated" if prior else "added", "source_id": sid, "chunks": len(chunks), "new_chunks": added, "removed_chunks": removed,
-            "embedded": sum(1 for v in vectors if v), "unembedded": sum(1 for v in vectors if not v)}
+    return {"url": url, "result": "updated" if prior else "added", "source_id": sid, "chunks": len(chunks), "new_chunks": added, "removed_chunks": removed}
 
 
-def backfill_embeddings(limit: int = 2000) -> int:
-    rows = db.query("SELECT chunk_id, content FROM knowledge_chunks WHERE embedding IS NULL ORDER BY chunk_id LIMIT %s", (limit,))
-    if not rows:
-        return 0
-    vecs = embeddings.embed([r["content"] for r in rows])
-    n = 0
-    with db.tx() as cur:
-        for r, v in zip(rows, vecs):
-            if v:
-                cur.execute("UPDATE knowledge_chunks SET embedding=%s::vector WHERE chunk_id=%s", (embeddings.to_pg(v), r["chunk_id"])); n += 1
-    return n
+def backfill_embeddings(limit: int = 5000, batch: int = 50) -> int:
+    """Embed chunks that have no vector yet, committing after every batch so progress survives crashes/rate limits."""
+    done = 0
+    while done < limit:
+        rows = db.query("SELECT chunk_id, content FROM knowledge_chunks WHERE embedding IS NULL ORDER BY chunk_id LIMIT %s", (batch,))
+        if not rows:
+            break
+        vecs = embeddings.embed([r["content"] for r in rows], batch=batch)
+        ok = [(r, v) for r, v in zip(rows, vecs) if v]
+        if not ok:
+            break                                   # the service refused this batch (quota); full-text search still works, next refresh resumes
+        with db.tx() as cur:
+            for r, v in ok:
+                cur.execute("UPDATE knowledge_chunks SET embedding=%s::vector WHERE chunk_id=%s", (embeddings.to_pg(v), r["chunk_id"]))
+        done += len(ok)
+    return done
 
 
 def refresh(actor: Actor | None = None, urls: list[str] | None = None, force: bool = False, import_courses: bool = True, delay: float = crawler.MIN_DELAY) -> dict:
