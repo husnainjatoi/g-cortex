@@ -1,6 +1,7 @@
 # G-Cortex — Campus Operating System for GIKI
 
-> **CS325 Software Engineering | Assignment #2 | Team Project**
+> **CS325 Software Engineering | Team Project**
+
 > Muhammad Husnain Jatoi (2024405) · Zahra Aliabbas (2024668) · Warda Ammad (2024662)
 
 ---
@@ -54,7 +55,7 @@ sudo -u postgres psql -d gcortex_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ### 2. Python Environment
 
 ```bash
-cd /home/husnainjatoi/g-cortex
+cd /home/username/g-cortex
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
