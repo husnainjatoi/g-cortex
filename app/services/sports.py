@@ -80,7 +80,7 @@ def availability(actor: Actor, facility_id: str, date: str) -> dict:
 
 
 @op("sports.book", "booking", "facility_id")
-def book(actor: Actor, facility_id: str, date: str, start_time: str, duration_hours: float = 1.0, student_id: str | None = None) -> dict:
+def book(actor: Actor, facility_id: str, date: str, start_time: str, duration_hours: float = 1.0, student_id: str | None = None, dry_run: bool = False) -> dict:
     sid = actor.resolve_student(student_id, "requisition")
     d, t = clock.parse_date(date, "date"), clock.parse_time(start_time, "start time")
     try:
@@ -128,6 +128,9 @@ def book(actor: Actor, facility_id: str, date: str, start_time: str, duration_ho
                     (v["venue_id"], start_dt, end_dt))
         if cur.fetchone()["n"] >= (1 if v["exclusive"] else v["capacity"]):
             raise RuleViolation(f"{v['name']} is already {'booked' if v['exclusive'] else 'full'} for that time.", code="slot_taken")
+        if dry_run:
+            return {"ok": True, "dry_run": True, "facility": v["name"], "date": str(d), "start_time": t.strftime("%H:%M"), "end_time": end_dt.strftime("%H:%M"),
+                    "duration_hours": dur, "daily_remaining_hours_after": max(0.0, daily - used_d - dur), "weekly_remaining_hours_after": max(0.0, weekly - used_w - dur)}
         cur.execute("SELECT nextval('booking_seq') AS n")
         code = f"BK-SPT-{cur.fetchone()['n']}"
         pin = f"CHK-{secrets.randbelow(10000):04d}"

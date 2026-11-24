@@ -52,6 +52,8 @@ def op(action: str, entity_type: str | None = None, entity_arg: str | None = Non
                 result = fn(*args, **kwargs)
             except ServiceError as exc:
                 events.discard_collection(token)
+                if bound.arguments.get("dry_run"):
+                    raise
                 entity = bound.arguments.get(entity_arg) if entity_arg else None
                 outcome = "denied" if isinstance(exc, Forbidden) else "failed"
                 safe_args = {k: v for k, v in bound.arguments.items() if k != "actor" and not k.startswith("password")}

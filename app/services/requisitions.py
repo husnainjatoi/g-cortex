@@ -185,7 +185,7 @@ def _fmt(r: dict) -> dict:
 
 @op("requisition.submit", "requisition", None)
 def submit_requisition(actor: Actor, society_name: str, venue_id: str, event_title: str, booking_date: str, start_time: str,
-                       duration_hours: float, expected_attendees: int, justification: str = "") -> dict:
+                       duration_hours: float, expected_attendees: int, justification: str = "", dry_run: bool = False) -> dict:
     actor.require_role("student")
     d, t = clock.parse_date(booking_date, "Event date"), clock.parse_time(start_time, "Start time")
     try:
@@ -228,6 +228,9 @@ def submit_requisition(actor: Actor, society_name: str, venue_id: str, event_tit
                        AND tsrange(start_ts,end_ts) && tsrange(%s,%s)""", (v["venue_id"], start_dt, end_dt))
         if cur.fetchone():
             raise RuleViolation(f"{v['name']} is already reserved during {t.strftime('%H:%M')}-{end_dt.strftime('%H:%M')} on {d}.", code="venue_conflict")
+        if dry_run:
+            return {"ok": True, "dry_run": True, "society": soc["society_name"], "venue": v["name"], "date": str(d), "start_time": t.strftime("%H:%M"),
+                    "end_time": end_dt.strftime("%H:%M"), "attendees": att, "first_approver": soc["advisor_name"]}
         cur.execute("SELECT nextval('requisition_seq') AS n")
         rid = f"REQ-{d.year}-{cur.fetchone()['n']}"
         chain = [{"tier": 1, "role": "faculty_advisor", "assigned_to": soc["advisor_id"], "advisor_name": soc["advisor_name"], "action": "pending", "timestamp": None, "comments": None},

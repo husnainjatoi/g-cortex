@@ -28,6 +28,8 @@ MEMBERS = [("ACM GIKI Chapter", "2024405", "member"), ("Netronix Networking Soci
 def seed() -> None:
     with db.tx() as cur:
         cur.execute("INSERT INTO student_profiles (user_id) SELECT user_id FROM users WHERE role='student' ON CONFLICT DO NOTHING")
+        # Seeded administrator accounts (e.g. ADMIN01) that pre-date scope-based RBAC receive the 'super' scope once.
+        cur.execute("INSERT INTO admin_scopes (user_id, scope) SELECT user_id, 'super' FROM users u WHERE role='admin' AND NOT EXISTS (SELECT 1 FROM admin_scopes s WHERE s.user_id=u.user_id)")
         cur.execute("UPDATE venues SET exclusive=FALSE WHERE venue_id='SPORTS_GYM'")
         for code, name in INSTRUCTORS.items():
             cur.execute("UPDATE courses SET instructor=COALESCE(instructor,%s) WHERE course_code=%s", (name, code))

@@ -243,7 +243,7 @@ def academic_record(actor: Actor, student_id: str | None = None) -> dict:
 # ── Student writes ──────────────────────────────────────────
 
 @op("course.register", "course", "course_code")
-def register(actor: Actor, course_code: str, student_id: str | None = None) -> dict:
+def register(actor: Actor, course_code: str, student_id: str | None = None, dry_run: bool = False) -> dict:
     sid = actor.resolve_student(student_id, "academic")
     code = (course_code or "").upper().strip()
     with db.tx() as cur:
@@ -275,6 +275,9 @@ def register(actor: Actor, course_code: str, student_id: str | None = None) -> d
                 code="schedule_conflict", details={"conflicts": clashes})
         if _seats_taken(cur, code, term) >= course["capacity"]:
             raise RuleViolation(f"{code} is full ({course['capacity']} seats).", code="course_full")
+        if dry_run:
+            return {"ok": True, "dry_run": True, "course_code": code, "title": course["title"], "credits": course["credits"], "term": term,
+                    "total_credits_after": total, "seats_left_after": course["capacity"] - _seats_taken(cur, code, term) - 1}
         cur.execute("INSERT INTO enrollments (user_id, course_code, term, channel) VALUES (%s,%s,%s,%s) RETURNING enrollment_id",
                     (sid, code, term, actor.channel))
         eid = cur.fetchone()["enrollment_id"]

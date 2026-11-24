@@ -47,7 +47,7 @@ def my_custody(actor: Actor, student_id: str | None = None) -> list[dict]:
 
 
 @op("equipment.checkout", "equipment", "barcode")
-def checkout(actor: Actor, barcode: str, purpose: str = "", days: int | None = None, student_id: str | None = None) -> dict:
+def checkout(actor: Actor, barcode: str, purpose: str = "", days: int | None = None, student_id: str | None = None, dry_run: bool = False) -> dict:
     sid = actor.resolve_student(student_id, "requisition")
     code = (barcode or "").upper().strip()
     purpose = (purpose or "").strip()
@@ -78,6 +78,8 @@ def checkout(actor: Actor, barcode: str, purpose: str = "", days: int | None = N
         if held["n"] >= max_items:
             raise RuleViolation(f"You already hold {held['n']} items (limit {max_items}).", code="item_limit")
         due = clock.today() + datetime.timedelta(days=days)
+        if dry_run:
+            return {"ok": True, "dry_run": True, "barcode": code, "name": e["name"], "lab": e["lab"], "due_date": str(due)}
         cur.execute("""UPDATE lab_equipment SET status='in_custody', custodian_id=%s, checkout_date=%s, due_date=%s, purpose=%s, updated_at=now() WHERE barcode=%s""",
                     (sid, clock.today(), due, purpose[:255], code))
         cur.execute("INSERT INTO equipment_custody_log (barcode, user_id, action, condition, note, channel) VALUES (%s,%s,'checkout',%s,%s,%s)", (code, sid, e["condition"], purpose[:255], actor.channel))
