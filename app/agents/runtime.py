@@ -2,6 +2,7 @@
 never from tool arguments or model output."""
 import contextvars
 import functools
+import json
 import logging
 from dataclasses import dataclass
 
@@ -42,7 +43,8 @@ def tool(fn):
     def wrapper(*args, **kwargs):
         try:
             out = fn(*args, **kwargs)
-            return out if isinstance(out, dict) else {"ok": True, "result": out}
+            out = out if isinstance(out, dict) else {"ok": True, "result": out}
+            return json.loads(json.dumps(out, default=str))   # dates/Decimals -> JSON-safe for the model
         except ServiceError as exc:
             return {"ok": False, "refused_by_backend": True, "code": exc.code, "error": exc.message, "details": exc.details}
         except Exception as exc:

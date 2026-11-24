@@ -72,6 +72,10 @@ SUBAGENT_LABELS = {
 }
 
 
+class ModelBusy(Exception):
+    """The model service is rate limited or temporarily unavailable (HTTP 429/503)."""
+
+
 @dataclass
 class IntentResult:
     intent: str  # "single_subagent" | "multi_subagent" | "clarification_needed" | "out_of_scope"
@@ -352,7 +356,13 @@ class CentralOrchestrator:
                             if getattr(part, "text", None):
                                 chunks.append(part.text)
 
-            await asyncio.wait_for(_stream(), timeout=60.0)
+            try:
+                await asyncio.wait_for(_stream(), timeout=60.0)
+            except Exception as exc:
+                text = f"{type(exc).__name__} {exc}"
+                if any(k in text for k in ("RESOURCE_EXHAUSTED", "429", "UNAVAILABLE", "503", "overloaded")):
+                    raise ModelBusy(text[:200]) from exc
+                raise
         finally:
             runtime.reset_context(token)
         reply = "".join(chunks).strip()
@@ -428,7 +438,7 @@ class CentralOrchestrator:
 
         routing = await self.classify_and_route(query, session)
         logger.info("Routing decision: intent=%s targets=%s", routing.intent, routing.target_subagents)
-        reply, routed_to = "", []
+        reply, routed_to, busy = "", [], False
 
         if routing.intent == "clarification_needed":
             reply, routed_to = routing.clarification_question or "Could you please clarify your request?", ["central_orchestrator"]
@@ -438,10 +448,15 @@ class CentralOrchestrator:
         elif routing.target_subagents:
             routed_to = list(routing.target_subagents)
             results: Dict[str, str] = {}
+            busy = False
             for target in routed_to:  # sequential: at most one staged confirmation, deterministic ordering
                 sub_query = routing.subagent_queries.get(target, query)
                 try:
                     results[target] = await self.invoke_subagent(target, sub_query, session, actor)
+                except ModelBusy:
+                    busy = True
+                    results[target] = ("⏳ The AI assistant is receiving too many requests right now. Please try again in about a minute. "
+                                       "No changes were made.")
                 except Exception as exc:
                     logger.error("Error invoking %s: %s", target, exc)
                     results[target] = (f"⚠️ The {SUBAGENT_LABELS.get(target, target)} could not complete this request right now ({type(exc).__name__}). "
@@ -450,7 +465,7 @@ class CentralOrchestrator:
         else:
             reply, routed_to = "I could not identify which part of campus services this relates to. Could you rephrase?", ["central_orchestrator"]
 
-        return self._finish(session, query, reply, routed_to, routing.intent, routing.reasoning, actor)
+        return self._finish(session, query, reply, routed_to, "model_busy" if (routing.target_subagents and routing.intent not in ("clarification_needed", "out_of_scope") and busy) else routing.intent, routing.reasoning, actor)
 
     def _finish(self, session: Session, query: str, reply: str, routed_to: List[str], intent: str, reasoning: str, actor: Actor,
                 executed: Optional[dict] = None) -> Dict[str, Any]:
