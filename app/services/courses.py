@@ -103,7 +103,7 @@ def _check_student(cur, user_id: str) -> None:
 
 
 def list_courses(actor: Actor, q: str | None = None, category: str | None = None, include_inactive: bool = False,
-                 student_id: str | None = None) -> list[dict]:
+                 student_id: str | None = None, offered_only: bool = False) -> list[dict]:
     if include_inactive:
         actor.require_scope("academic")
     with db.tx() as cur:
@@ -116,9 +116,11 @@ def list_courses(actor: Actor, q: str | None = None, category: str | None = None
             params += [f"%{q}%"] * 4
         if category:
             where.append("c.category = %s"); params.append(category)
+        if offered_only:
+            where.append("NOT c.catalog_only")
         cur.execute(
             f"""SELECT c.course_code, c.title, c.credits, c.slot, c.lab_slot, c.category, c.domains, c.description,
-                       c.instructor, c.capacity, c.is_active,
+                       c.instructor, c.capacity, c.is_active, c.catalog_only, c.department,
                        (SELECT COUNT(*) FROM enrollments e WHERE e.course_code=c.course_code AND e.term=%s AND e.status='registered') AS seats_taken,
                        COALESCE((SELECT array_agg(p.prereq_code ORDER BY p.prereq_code) FROM course_prerequisites p WHERE p.course_code=c.course_code), '{{}}') AS prerequisites
                 FROM courses c {('WHERE ' + ' AND '.join(where)) if where else ''} ORDER BY c.course_code""", [term] + params)
@@ -130,7 +132,7 @@ def list_courses(actor: Actor, q: str | None = None, category: str | None = None
             if sid:
                 missing = [p for p in r["prerequisites"] if p not in passed]
                 r["student_status"] = ("registered" if r["course_code"] in regs else "completed" if r["course_code"] in passed
-                                       else "blocked_prerequisites" if missing else "full" if r["seats_left"] == 0 else "available")
+                                       else "not_offered" if r["catalog_only"] else "blocked_prerequisites" if missing else "full" if r["seats_left"] == 0 else "available")
                 r["missing_prerequisites"] = missing
         return rows
 
@@ -141,6 +143,8 @@ def get_course(actor: Actor, code: str, student_id: str | None = None) -> dict:
         raise NotFound(f"Course '{code}' does not exist.")
     course = rows[0]
     course["prerequisite_chain"] = prerequisite_chain(code)["chain"]
+    from .catalog_import import course_source
+    course["official_source"] = course_source(code)
     return course
 
 
@@ -253,6 +257,8 @@ def register(actor: Actor, course_code: str, student_id: str | None = None, dry_
         course = _course(cur, code, lock=True)                                  # serialise seat counting per course
         if not course["is_active"]:
             raise RuleViolation(f"{code} is not open for registration.")
+        if course["catalog_only"]:
+            raise RuleViolation(f"{code} is in the official GIKI catalogue but is not scheduled for {_term(cur)}; it cannot be registered yet.", code="not_offered")
         regs = _registered(cur, sid, term)
         if any(c["course_code"] == code for c in regs):
             raise Conflict(f"You are already registered for {code}.")
@@ -337,13 +343,14 @@ def recommend_electives(actor: Actor, interests: str | None = None, student_id: 
             hay = _tokens(" ".join([c["title"], c["domains"] or "", c["description"] or ""]))
             hits = sorted(want & hay)
             missing = [p for p in _prereqs(cur, c["course_code"]) if p not in passed]
-            score = len(hits) * 10 + (5 if not missing else 0) + (2 if c["category"] == "elective" else 0)
+            score = len(hits) * 10 + (5 if not missing else 0) + (2 if c["category"] == "elective" else 0) + (3 if not c["catalog_only"] else 0)
             if want and not hits:
                 continue
-            cands.append({"course_code": c["course_code"], "title": c["title"], "credits": c["credits"], "category": c["category"],
+            cands.append({"course_code": c["course_code"], "title": c["title"], "credits": c["credits"], "category": c["category"], "offered_this_term": not c["catalog_only"],
                           "domains": c["domains"], "matched_interests": hits, "missing_prerequisites": missing,
                           "eligible_now": not missing, "score": score,
                           "reason": (f"Matches your interest in {', '.join(hits)}" if hits else "Open elective you are eligible for")
+                                    + ("" if not c["catalog_only"] else " (official catalogue course, not yet scheduled)")
                                     + ("" if not missing else f"; requires {', '.join(missing)} first")})
         cands.sort(key=lambda x: (-x["score"], x["course_code"]))
         return {"student_id": sid, "interests_used": text, "recommendations": cands[:max(1, min(limit, 10))]}
@@ -401,27 +408,10 @@ def what_if(actor: Actor, minors: list[str] | None = None, hypothetical_courses:
                 "combined_remaining": sorted(c for c in union_required if c not in effective)}
 
 
-def ask_giki(question: str, limit: int = 3) -> dict:
-    """Policy retrieval for the 'Ask GIKI' engine: ranked full-text search over the university policy corpus."""
-    question = (question or "").strip()
-    if len(question) < 3:
-        raise ValidationFailed("Please enter a question of at least 3 characters.")
-    toks = [t for t in _tokens(question)]
-    if not toks:
-        toks = re.findall(r"[a-z0-9]+", question.lower())
-    ts = " | ".join(re.sub(r"[^a-z0-9]", "", t) for t in toks if re.sub(r"[^a-z0-9]", "", t))
-    rows = db.query(
-        """SELECT topic, title, policy_text,
-                  ts_rank(to_tsvector('english', title || ' ' || policy_text || ' ' || topic), to_tsquery('english', %s)) AS rank
-           FROM university_policies
-           WHERE to_tsvector('english', title || ' ' || policy_text || ' ' || topic) @@ to_tsquery('english', %s)
-           ORDER BY rank DESC LIMIT %s""", (ts, ts, max(1, min(limit, 5)))) if ts else []
-    if not rows:
-        return {"question": question, "found": False, "passages": [],
-                "answer": "I could not find a university policy matching that question. Please contact the Registrar's office."}
-    return {"question": question, "found": True,
-            "passages": [{"topic": r["topic"], "title": r["title"], "text": r["policy_text"], "relevance": round(float(r["rank"]), 3)} for r in rows],
-            "answer": f"{rows[0]['title']}: {rows[0]['policy_text']}", "source": "university_policies"}
+def ask_giki(question: str, limit: int = 4) -> dict:
+    """Ask GIKI: hybrid (pgvector + full-text) retrieval over OFFICIAL giki.edu.pk documents only, with source references."""
+    from . import knowledge
+    return knowledge.ask(question, limit)
 
 
 # ── Administration ──────────────────────────────────────────
@@ -468,6 +458,10 @@ def _validate_course_fields(f: dict, creating: bool) -> dict:
             out[key] = (f.get(key) or "").strip() or None
     if "is_active" in f:
         out["is_active"] = bool(f["is_active"])
+    if "catalog_only" in f:
+        out["catalog_only"] = bool(f["catalog_only"])
+    if "department" in f:
+        out["department"] = (f.get("department") or "").strip()[:120] or None
     return out
 
 

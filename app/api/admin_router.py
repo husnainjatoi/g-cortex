@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app.api.deps import current_actor
-from app.services import audit, auth, courses, events, reports, settings
+from app.services import audit, auth, catalog_import, courses, events, knowledge, reports, settings
 from app.services.actor import Actor
 
 router = APIRouter()
@@ -36,6 +36,8 @@ class CoursePatch(BaseModel):
     description: str | None = None
     domains: str | None = None
     is_active: bool | None = None
+    catalog_only: bool | None = None
+    department: str | None = None
 
 
 class GradeBody(BaseModel):
@@ -182,3 +184,31 @@ def recent_events(limit: int = 50, actor: Actor = Depends(current_actor)):
 def retry_events(actor: Actor = Depends(current_actor)):
     actor.require_scope("super")
     return events.retry_failed()
+
+
+# ── Official GIKI data (knowledge base + course catalogue import) ──
+@router.get("/knowledge/status")
+def knowledge_status(actor: Actor = Depends(current_actor)):
+    return knowledge.status(actor)
+
+
+@router.get("/knowledge/sources")
+def knowledge_sources(actor: Actor = Depends(current_actor)):
+    actor.require_scope("academic")
+    return knowledge.list_sources(actor)
+
+
+@router.post("/knowledge/refresh")
+def knowledge_refresh(force: bool = False, actor: Actor = Depends(current_actor)):
+    """Re-crawl the official giki.edu.pk sources (same domain/robots restrictions as the CLI) in the background."""
+    return knowledge.start_refresh_async(actor, force)
+
+
+@router.get("/knowledge/flags")
+def knowledge_flags(status: str | None = "open", actor: Actor = Depends(current_actor)):
+    return catalog_import.list_flags(actor, status)
+
+
+@router.post("/knowledge/flags/{flag_id}/{action}")
+def resolve_flag(flag_id: int, action: str, actor: Actor = Depends(current_actor)):
+    return catalog_import.resolve_flag(actor, flag_id, action)

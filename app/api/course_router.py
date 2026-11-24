@@ -28,8 +28,9 @@ class InterestBody(BaseModel):
 
 
 @router.get("")
-def list_courses(q: str | None = None, category: str | None = None, student_id: str | None = None, actor: Actor = Depends(current_actor)):
-    return courses.list_courses(actor, q, category, False, student_id)
+def list_courses(q: str | None = None, category: str | None = None, student_id: str | None = None, offered_only: bool = False, actor: Actor = Depends(current_actor)):
+    """offered_only=true hides official-catalogue courses that are not scheduled this term."""
+    return courses.list_courses(actor, q, category, False, student_id, offered_only)
 
 
 @router.get("/me/registrations")

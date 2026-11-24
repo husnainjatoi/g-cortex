@@ -4,17 +4,19 @@ from app.services import courses
 
 
 @tool
-def get_available_courses(search: str = "", category: str = "") -> dict:
-    """List active courses with credits, timetable slot, prerequisites, seats left and YOUR status for each
-    (available / registered / completed / blocked_prerequisites / full).
+def get_available_courses(search: str = "", category: str = "", include_unscheduled: bool = False) -> dict:
+    """List courses with credits, timetable slot, prerequisites, seats left and YOUR status for each
+    (available / registered / completed / blocked_prerequisites / full / not_offered). By default only courses scheduled this
+    term are returned; set include_unscheduled=true to also see the wider official GIKI catalogue (those cannot be registered yet).
 
     Args:
         search: Optional text to match against code, title or topics (e.g. 'machine learning').
         category: Optional category filter: core, elective, math, humanities, science.
+        include_unscheduled: Include official-catalogue courses that are not offered this term.
     """
-    rows = courses.list_courses(context().actor, search or None, category or None)
+    rows = courses.list_courses(context().actor, search or None, category or None, offered_only=not include_unscheduled)
     return {"ok": True, "count": len(rows), "courses": [
-        {k: r[k] for k in ("course_code", "title", "credits", "slot", "lab_slot", "category", "prerequisites", "seats_left", "instructor", "student_status", "missing_prerequisites") if k in r}
+        {k: r[k] for k in ("course_code", "title", "credits", "slot", "lab_slot", "category", "prerequisites", "seats_left", "instructor", "student_status", "missing_prerequisites", "department") if k in r}
         for r in rows]}
 
 
@@ -118,8 +120,9 @@ def simulate_what_if_degree(minors: list[str] | None = None, hypothetical_course
 
 @tool
 def ask_giki_policy(question: str) -> dict:
-    """Answer academic/regulatory questions from the official GIKI policy corpus (retrieval). Quote the returned text; do
-    not invent regulations that were not retrieved.
+    """Answer academic/regulatory questions from OFFICIAL GIKI documents (giki.edu.pk: Student Handbook, prospectus, calendar...) via retrieval.
+    Base the answer ONLY on the returned passages, cite the source title/section/page and URL given, and if found=false say plainly that the
+    official documents indexed do not answer it. Never state a policy that was not retrieved.
 
     Args:
         question: The policy question in natural language.

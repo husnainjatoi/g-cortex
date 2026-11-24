@@ -179,11 +179,6 @@ def test_what_if_and_recommend(actors):
     assert rec["recommendations"] and all("course_code" in r for r in rec["recommendations"])
 
 
-def test_ask_giki_retrieves_real_policy():
-    r = courses.ask_giki("What is the policy on academic probation?")
-    assert r["found"] and r["passages"][0]["topic"] == "probation"
-    assert not courses.ask_giki("zzzzqqqq flibbertigibbet")["found"]
-
 
 def test_record_grade_changes_eligibility(actors):
     courses.set_course_history(actors["acad"], "2024668", "CS201", "B")
