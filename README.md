@@ -1,242 +1,144 @@
 # G-Cortex — Campus Operating System for GIKI
 
-> **CS325 Software Engineering | Assignment #2 | Team Project**
-> Muhammad Husnain Jatoi (2024405) · Zahra Aliabbas (2024668) · Warda Ammad (2024662)
+G-Cortex is a campus management portal with an integrated multi-agent AI assistant. Students, faculty and administrators sign in to one
+website to manage **courses**, **mess**, and **campus resources (requisitions, sports, lab equipment)** — manually through the portal, or by
+asking the assistant to do the same thing for them.
 
----
-
-## Vision
-
-G-Cortex replaces GIKI's fragmented, paper-heavy administrative infrastructure with an autonomous, event-driven campus operating system. Three specialized AI-powered subagents handle academic planning, dining operations, and campus resource allocation — all backed by a unified PostgreSQL database with cross-subagent event-bus communication.
-
----
-
-## Architecture
+> **One backend, two interfaces.** The portal pages and the assistant call the *same* service layer, authenticated by the *same* session,
+> authorised by the *same* RBAC rules, writing to the *same* PostgreSQL database. There is no second implementation of any rule.
 
 ```
-Client Layer         →   Web Chat Interface (/chat) + REST API (FastAPI)
-Orchestration Layer  →   Central Intelligent Orchestrator + Session Manager + Event Bus
-Intelligence Layer   →   4 ADK AI Agents (Orchestrator + 3 Subagents with Gemini LLM & DB Tools)
-Data Layer           →   PostgreSQL (gcortex_db) + pgvector
+ Browser (SPA)                          Chat widget (every page)
+      │  cookie session                       │  cookie session
+      ▼                                       ▼
+ REST API (FastAPI)  ───────────────►  Central Orchestrator ──► Course / Mess / Requisition subagents (Google ADK)
+      │                                                              │  explicit, user-bound TOOLS only
+      ▼                                                              ▼
+ ┌────────────────────────────  app/services  (shared business logic)  ────────────────────────────┐
+ │ auth · courses · mess · requisitions · sports · equipment · reports · settings · audit · events │
+ └───────────────────────────────────────────────┬──────────────────────────────────────────────────┘
+                                                 ▼
+                       PostgreSQL (+ pgvector) — single source of truth, append-only audit log
 ```
 
-### Central Orchestrator & Autonomous Subagents
-
-| Agent / Interface | Path / Prefix | Capabilities |
-|---|---|---|
-| **Central Orchestrator** | `/api/orchestrator`<br>`/chat` (Web UI) | Natural language intent routing, multi-turn session memory, ambiguous query clarification, multi-agent coordination & synthesis, out-of-scope boundaries |
-| **Course Management** | `/api/courses` | DAG prerequisite engine, enrollment eligibility, schedule conflict matrix, What-If degree simulator, elective recommender, Ask-GIKI policy engine |
-| **Mess Management** | `/api/mess` | TOTP QR dining gatekeeping, gate-pass-synced rebate ledgering, allergen shield, predictive kitchen demand forecasting |
-| **Requisition Management** | `/api/req` | Multi-tier society approval chains, fair-use sports reservations (2h/day cap), lab equipment barcode custody, natural language venue recommender, zero-trust no-show auto-release |
-
----
-
-## Prerequisites
-
-- Ubuntu 22.04+ (or WSL2)
-- Python 3.12
-- PostgreSQL 14+ with `pgvector` extension
-- Google Cloud credentials (for ADK agent LLM access)
-
----
+## Technologies
+FastAPI · PostgreSQL 14+ (btree_gist, pgcrypto, pgvector extension available) · psycopg2 · Google ADK + Gemini · vanilla-JS SPA (no build step) · pytest.
 
 ## Setup
 
-### 1. Database
-
 ```bash
-# Create database
-sudo -u postgres psql -c "CREATE DATABASE gcortex_db;"
-
-# Install pgvector extension
-sudo -u postgres psql -d gcortex_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt            # add: pytest qrcode  (see requirements.txt)
+createdb gcortex_db                         # PostgreSQL with the `vector` extension installed
 ```
 
-### 2. Python Environment
+### Environment variables
+Put these in a root `.env` (git-ignored). The legacy `app/agents/*/.env` files are still read as a fallback.
 
-```bash
-cd /home/husnainjatoi/g-cortex
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 3. Environment Variables
-
-Create `.env` files inside each agent directory (`.env` is gitignored):
-
-```bash
-# app/agents/course_management_agent/.env
-DATABASE_URL=postgresql://postgres:postgres@localhost/gcortex_db
-GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-GOOGLE_CLOUD_LOCATION=us-central1
-
-# Same structure for mess_management_agent/.env and requisition_management_agent/.env
-```
-
-### 4. Seed the Database
-
-```bash
-source .venv/bin/activate
-python seed_db.py
-```
-
-### 5. Run the API Server & Chat Interface
-
-```bash
-source .venv/bin/activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
-
-- **Interactive Web Chat Interface**: `http://localhost:8000/chat`
-- **Swagger API Documentation**: `http://localhost:8000/docs`
-- **ReDoc API Documentation**: `http://localhost:8000/redoc`
-
-### 6. Run AI Agents (ADK)
-
-Each subagent can be run independently via the Google ADK CLI:
-
-```bash
-# Course Management Agent
-cd app/agents/course_management_agent
-source ../../../.venv/bin/activate
-adk run .
-
-# Mess Management Agent
-cd app/agents/mess_management_agent
-adk run .
-
-# Requisition Management Agent
-cd app/agents/requisition_management_agent
-adk run .
-```
-
----
-
-## Running Tests
-
-```bash
-source .venv/bin/activate
-
-# 1. Run full subagent test suite (54 test cases)
-python test_all.py
-
-# 2. Run Central Orchestrator test suite (12 test cases)
-python test_orchestrator.py
-```
-
-The test suites cover **66 automated test cases** across:
-- Central Orchestrator routing, multi-turn context, disambiguation, and multi-agent synthesis
-- Session isolation and lifecycle management
-- Database connectivity and schema validation
-- All 8 Course Management agent tools
-- All 6 Mess Management agent tools
-- All 12 Requisition Management agent tools
-- Event Bus pub/sub, error isolation, and log recording
-- RBAC security layer permission checks
-- REST API router import and structure validation
-
----
-
-## API Quick Reference
-
-### Central Orchestrator (`/api/orchestrator` & `/chat`)
-
-| Method | Endpoint | Description |
+| Variable | Purpose | Default |
 |---|---|---|
-| `GET` | `/chat` | Interactive Web Chat Interface |
-| `POST` | `/api/orchestrator/chat` | Send natural language prompt to Central Orchestrator |
-| `POST` | `/api/orchestrator/session/new` | Create an isolated conversation session |
-| `GET` | `/api/orchestrator/session/{id}/history` | Get message history for a session |
-| `DELETE` | `/api/orchestrator/session/{id}` | Clear/delete conversation session |
-| `GET` | `/api/orchestrator/sessions` | List active sessions |
-| `GET` | `/api/orchestrator/status` | Central Orchestrator & subagent status |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://postgres:postgres@localhost/gcortex_db` |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Model access for the assistant | – (assistant reports it is unavailable) |
+| `ASSISTANT_MODEL` | Gemini model name | `gemini-3.5-flash-lite` |
+| `SESSION_TTL_HOURS` | Sign-in session lifetime | `12` |
+| `COOKIE_SECURE` | Set `true` behind HTTPS | `false` |
+| `GATE_API_KEY` | Shared secret for the gate-controller REST integration | unset (integration disabled) |
+| `MAX_FAILED_LOGINS` / `LOCKOUT_MINUTES` | Account lockout policy | `5` / `15` |
+| `BACKGROUND_JOBS` | No-show sweeper and event retry loop | `true` |
 
-### Course Management (`/api/courses`)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/courses/` | List all courses |
-| `GET` | `/api/courses/{code}` | Get course details |
-| `GET` | `/api/courses/{code}/prerequisites` | Full prerequisite DAG chain |
-| `POST` | `/api/courses/{code}/can-enroll` | Enrollment eligibility check |
-
-### Mess Management (`/api/mess`)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/mess/rebate` | Apply for mess rebate |
-| `POST` | `/api/mess/qr-token` | Generate TOTP meal QR token |
-| `POST` | `/api/mess/verify-entry` | Verify turnstile QR scan |
-| `GET` | `/api/mess/menu/{meal_period}` | Menu macros + allergen shield |
-| `GET` | `/api/mess/forecast/{meal_period}` | Kitchen demand forecast |
-| `GET` | `/api/mess/profile/{reg_no}` | Student mess profile |
-
-### Requisition Management (`/api/req`)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/req/society-requisitions` | Submit society venue requisition |
-| `GET` | `/api/req/society-requisitions/{id}` | Get requisition status + approval trail |
-| `POST` | `/api/req/society-requisitions/{id}/review` | Approve/reject at current tier |
-| `POST` | `/api/req/sports/reserve` | Reserve sports facility |
-| `GET` | `/api/req/sports/availability` | Check sports facility availability |
-| `POST` | `/api/req/venues/recommend` | Natural language venue recommendation |
-| `POST` | `/api/req/equipment/{barcode}/checkout` | Lab equipment barcode checkout |
-| `POST` | `/api/req/equipment/{barcode}/return` | Lab equipment barcode return |
-| `GET` | `/api/req/equipment` | Query equipment inventory |
-| `POST` | `/api/req/bookings/{id}/checkin` | Zero-trust physical check-in |
-| `POST` | `/api/req/bookings/auto-release` | Auto-release no-show bookings |
-| `GET` | `/api/req/profile/{reg_no}` | Student requisition profile |
-
----
-
-## Database Schema
-
+### Database setup and migrations
+```bash
+python -m app.migrate          # applies migrations/000…NNN (forward-only, one transaction each, tracked in schema_migrations)
+python seed_db.py              # reference campus data: users, courses, menu, venues, societies, equipment
+python -m app.seed_portal      # non-secret reference data: instructors, lab slots, academic history, society memberships
 ```
-users                   → Centralized RBAC (student / faculty / admin)
-courses                 → Course catalog with time slots and domain tags
-course_prerequisites    → Prerequisite DAG (many-to-many)
-degree_minors           → Minor tracks (AI, Software Systems, Embedded)
-university_policies     → Ask-GIKI RAG knowledge base
-mess_ledger             → Daily meal consumption and rebate log
-gate_passes             → Campus security exit clearances
-mess_rebates            → Financial rebate ledger (gate-pass-synced)
-daily_menu              → Meal periods with macros and allergens
-venues                  → Rooms, labs, sports, auditoriums
-bookings                → Spatial reservations with zero-trust tokens
-campus_societies        → Student societies and faculty advisors
-society_requisitions    → Multi-tier digital approval chains
-lab_equipment           → Barcode-tracked hardware custody
-no_show_records         → Zero-trust penalty strike ledger
+Migrations add credentials, admin scopes, revocable sessions, enrolments, course history, mess-out requests, TOTP redemptions, booking
+**exclusion constraints** (no double booking), a transactional event outbox, notifications and an **append-only audit log** (database trigger
+rejects UPDATE/DELETE/TRUNCATE).
+
+### Provisioning accounts (no credentials live in source code)
+Roles are stored in `users.role` and `admin_scopes`; the login page never selects a role.
+```bash
+python -m app.cli provision-all                    # one-time random passwords for every account without one (shown once; change forced at first login)
+python -m app.cli create-admin ADMIN02 registrar@giki.edu.pk "Registrar Office" --scopes academic
+python -m app.cli create-student 2024999 u2024999@giki.edu.pk "New Student"
+python -m app.cli set-password ADMIN01              # hidden prompt, or GCORTEX_PASSWORD env var; never a CLI argument
+```
+Admin scopes separate responsibilities: `academic` (courses), `mess`, `requisition` (approvals, venues, sports, equipment) and `super`
+(users, settings, audit; implies all). Administrators can later manage users from **Users & Roles** in the portal.
+
+### Run
+```bash
+uvicorn main:app --reload        # portal at http://localhost:8000/   ·   API docs at /docs   ·   health at /health
 ```
 
----
+### Tests
+```bash
+pytest -m "not llm"      # services, HTTP/RBAC, concurrency, audit, events — real PostgreSQL (database gcortex_test is recreated)
+pytest -m llm            # cross-interface tests that call the real Gemini model (slow; free tier is ~15 requests/min, tests back off)
+```
+Tests never use mocked service responses. They run against a throwaway `gcortex_test` database derived from `DATABASE_URL`.
 
-## Software Process Model
+## Using the portal
+* **Student** — Dashboard; *Courses & Timetable* (catalogue with prerequisite/clash warnings, register/drop, timetable with lab/lecture clash matrix,
+  elective recommender, what-if minor simulator, Ask GIKI policy retrieval, academic record); *Mess* (mess-out with live rebate preview, rebate ledger,
+  rotating TOTP dining QR, meal records and macros, allergen shield); *Requisitions* (file, track stages and pending authority, venue recommender);
+  *Sports Booking* (slot grid, daily/weekly quota, check-in PIN, cancel); *Lab Equipment* (borrow/return by barcode, custody history);
+  *Notifications & Activity* (including your rejected attempts).
+* **Faculty** — advisor approval queue (Tier 1), mess demand forecast.
+* **Administrator** — scope-filtered reports (charts and tables), course/prerequisite/capacity administration with student lists, users & roles,
+  mess approvals/attendance/menu/forecast/gate-pass sync, requisition Tier-2 approvals, venues & sports quotas, equipment inventory, rules & settings,
+  audit trail and event pipeline.
 
-**Agile (Scrum)** — 6-phase cycle:
-1. Product Backlog Creation
-2. Sprint Planning (2-week sprints)
-3. Sprint Execution (parallel subagent development)
-4. CI/CD Testing
-5. Sprint Review
-6. Sprint Retrospective
+## How the assistant works
+`Student → chat → Central Orchestrator → (Course | Mess | Requisition) subagent → tool → app.services → PostgreSQL`
+* The orchestrator classifies each message (Gemini, with a deterministic fallback), routes to one or several subagents and returns a single reply.
+  Follow-ups keep context (per-user chat session + per-subagent ADK session).
+* **Controlled tools only** (`app/agents/tools`): no SQL, no DB handle, no `user_id` parameter. Identity is bound server-side from the signed-in session
+  (`app/agents/runtime.py`); the model cannot choose whose data it acts on. Other users' chat sessions and confirmations are unreachable.
+* **Confirmation gate**: tools that change state only *stage* an action after a dry-run of the real rules. It executes only when the user replies
+  “yes”/presses Confirm — handled deterministically, never by the model — then the outcome is read back from the database before success is reported.
+* The backend remains the final authority: a refused rule (prerequisite, quota, notice period, approval chain, permission) is reported to the user, not worked around.
+* If the model is rate-limited or unavailable the user is told so and nothing is changed — there is no simulated fallback data.
+* Assistant actions are tagged `channel = assistant` in the audit log and show up immediately in the matching portal page.
 
----
+## Event-driven pipeline
+Services write domain events in the same transaction as the change (outbox); after commit, idempotent handlers (`app/services/handlers.py`) run in their own
+transactions, recorded in `event_handler_runs` so duplicates are impossible and failures are retried (admin **Audit & Events** page / background loop).
+Examples: mess-out approval → rebate ledger + `rebated` meal rows; final requisition approval → venue booking + notifications; booking release → strike/suspension + notifications;
+gate-pass sync → auto-approval of covered pending mess-outs; equipment damage → admin alert.
 
-## Project Scope
+## Proposal coverage
+| Proposal feature | Where |
+|---|---|
+| Prerequisite DAG evaluation | `courses.prerequisite_chain / check_prerequisites` (cycle-safe, admin edits rejected if circular) |
+| Schedule conflict matrix | `courses.find_conflicts / timetable` (lecture/lecture, lecture/lab, lab/lab) |
+| Interest-based elective recommendation | `courses.recommend_electives` (keyword relevance over course topics, eligibility-aware) |
+| What-if degree/minor simulator | `courses.what_if` (single/combined minors, hypothetical courses, blockers, overlaps) |
+| “Ask GIKI” RAG policy engine | `courses.ask_giki` — PostgreSQL full-text retrieval over `university_policies`, extractive answers (see limitations) |
+| TOTP dynamic QR gatekeeping | `mess.generate_qr / verify_entry` — HMAC-SHA1 TOTP (30 s), single-use redemption table, anti-passback |
+| Automated rebate ledgering | event handler `credit_rebate_ledger` |
+| Gate-pass synchronisation | `POST /api/mess/gate-pass-sync` (gate controller key or Mess Office) |
+| Predictive demand forecasting | `mess.forecast` — weighted same-weekday moving average of real entries minus approved mess-outs |
+| Nutritional macros & allergen shield | `mess.menu / meal_records / allergen_check` |
+| Multi-tier approval chains | `requisitions.review_requisition` (Advisor → Student Affairs) |
+| Sports reservations with fair-use quotas, no-show auto-release | `sports.book / auto_release` (+ background sweeper) |
+| Lab equipment barcode custody | `equipment.*` with `equipment_custody_log` |
+| NL venue recommender | `requisitions.recommend_venue` |
+| Event-driven pipeline, centralized RBAC, unified reporting | `services/events.py`, `services/actor.py`, `services/reports.py` |
 
-**In-Scope:** Course DAG engine, TOTP mess gatekeeping, rebate ledgering, fair-use sports reservations, lab barcode custody, multi-tier society requisitions, event bus, RBAC, unified API.
+## Security notes
+scrypt password hashing · server-side revocable sessions in HttpOnly SameSite=Strict cookies · lockout after repeated failures · backend RBAC on every operation
+(`Actor` is built only from the session) · parameterised SQL only · origin/CSRF guard and security headers · row locks, advisory locks and exclusion constraints for
+concurrency · append-only audit log (successes, denials and failures, with channel) · secrets only from the environment.
 
-**Out-of-Scope:** Physical hardware/turnstile manufacturing, real-time bank clearing, alumni records, clinical EHR.
-
----
-
-## Team
-
-| Name | Reg. No. | Contribution |
-|---|---|---|
-| Muhammad Husnain Jatoi | 2024405 | Project vision, Course Management Subagent, Software Process Model |
-| Zahra Aliabbas | 2024668 | System Analysis, Mess Management Subagent, Project Objectives |
-| Warda Ammad | 2024662 | Requisition Subagent, App Logo, Cross-Subagent Integration Pipeline |
+## Known limitations and external integrations
+* **Gate/turnstile hardware** is not controlled. `POST /api/mess/verify-entry` and `/gate-pass-sync` are the REST integration points for an existing gate controller
+  (authenticated by `X-Gate-Key`); until a real controller is connected, scans can be exercised from tests or the admin gate-pass form.
+* **Fee payments**: no bank/card processing (out of scope per proposal); challan generation and receipt upload are *not* implemented.
+* **Ask GIKI** retrieves from the policy table with full-text search; the `policy_embedding` pgvector column exists but no embedding model is wired, so semantic (vector) retrieval is not active.
+* **Elective recommender / forecaster** are transparent heuristics/statistics, not trained ML models.
+* **Email/SMS** notifications are not sent; notifications are in-app only.
+* The assistant depends on the Gemini API (rate-limited on free tier). Chat session history is held in server memory (lost on restart); staged actions and the audit trail are persisted.
+* Faculty accounts can use the advisor queue and forecast; the assistant's action tools are student-oriented (administrators perform administration through the portal).
+* The visual UI was checked with a headless Chrome walkthrough of every route for all three roles; it has not been through usability testing.
