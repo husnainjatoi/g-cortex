@@ -7,13 +7,14 @@ from .errors import NotFound, ValidationFailed
 _NUMERIC = {"max_credits_per_term", "mess_daily_rate", "mess_min_days", "mess_max_days", "mess_notice_days",
             "sports_daily_quota_hours", "sports_weekly_quota_hours", "sports_open_hour", "sports_close_hour",
             "sports_advance_days", "cancel_cutoff_minutes", "checkin_grace_minutes", "strike_limit",
-            "suspension_days", "equipment_max_items", "equipment_max_days"}
+            "suspension_days", "equipment_max_items", "equipment_max_days", "requisition_notice_days",
+            "requisition_max_hours", "requisition_max_pending", "sports_checkin_early_minutes"}
 # which admin scope may edit which setting
 _SCOPE = {"current_term": "academic", "max_credits_per_term": "academic", "drop_deadline": "academic"}
 for _k in _NUMERIC:
     if _k.startswith("mess"):
         _SCOPE[_k] = "mess"
-    elif _k.startswith(("sports", "cancel", "checkin", "strike", "suspension", "equipment")):
+    elif _k.startswith(("sports", "cancel", "checkin", "strike", "suspension", "equipment", "requisition")):
         _SCOPE[_k] = "requisition"
 
 
