@@ -14,16 +14,17 @@ G-Cortex replaces GIKI's fragmented, paper-heavy administrative infrastructure w
 ## Architecture
 
 ```
-Client Layer         →   REST API (FastAPI)
-Orchestration Layer  →   Event Bus + API Gateway (3 routers)
-Intelligence Layer   →   ADK AI Agents (deterministic tools + Gemini LLM)
+Client Layer         →   Web Chat Interface (/chat) + REST API (FastAPI)
+Orchestration Layer  →   Central Intelligent Orchestrator + Session Manager + Event Bus
+Intelligence Layer   →   4 ADK AI Agents (Orchestrator + 3 Subagents with Gemini LLM & DB Tools)
 Data Layer           →   PostgreSQL (gcortex_db) + pgvector
 ```
 
-### Three Autonomous Subagents
+### Central Orchestrator & Autonomous Subagents
 
-| Subagent | Prefix | Capabilities |
+| Agent / Interface | Path / Prefix | Capabilities |
 |---|---|---|
+| **Central Orchestrator** | `/api/orchestrator`<br>`/chat` (Web UI) | Natural language intent routing, multi-turn session memory, ambiguous query clarification, multi-agent coordination & synthesis, out-of-scope boundaries |
 | **Course Management** | `/api/courses` | DAG prerequisite engine, enrollment eligibility, schedule conflict matrix, What-If degree simulator, elective recommender, Ask-GIKI policy engine |
 | **Mess Management** | `/api/mess` | TOTP QR dining gatekeeping, gate-pass-synced rebate ledgering, allergen shield, predictive kitchen demand forecasting |
 | **Requisition Management** | `/api/req` | Multi-tier society approval chains, fair-use sports reservations (2h/day cap), lab equipment barcode custody, natural language venue recommender, zero-trust no-show auto-release |
@@ -80,14 +81,16 @@ source .venv/bin/activate
 python seed_db.py
 ```
 
-### 5. Run the API Server
+### 5. Run the API Server & Chat Interface
 
 ```bash
 source .venv/bin/activate
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-API docs available at: `http://localhost:8000/docs`
+- **Interactive Web Chat Interface**: `http://localhost:8000/chat`
+- **Swagger API Documentation**: `http://localhost:8000/docs`
+- **ReDoc API Documentation**: `http://localhost:8000/redoc`
 
 ### 6. Run AI Agents (ADK)
 
@@ -114,10 +117,17 @@ adk run .
 
 ```bash
 source .venv/bin/activate
+
+# 1. Run full subagent test suite (54 test cases)
 python test_all.py
+
+# 2. Run Central Orchestrator test suite (12 test cases)
+python test_orchestrator.py
 ```
 
-The test suite covers **50 test cases** across:
+The test suites cover **66 automated test cases** across:
+- Central Orchestrator routing, multi-turn context, disambiguation, and multi-agent synthesis
+- Session isolation and lifecycle management
 - Database connectivity and schema validation
 - All 8 Course Management agent tools
 - All 6 Mess Management agent tools
@@ -129,6 +139,18 @@ The test suite covers **50 test cases** across:
 ---
 
 ## API Quick Reference
+
+### Central Orchestrator (`/api/orchestrator` & `/chat`)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/chat` | Interactive Web Chat Interface |
+| `POST` | `/api/orchestrator/chat` | Send natural language prompt to Central Orchestrator |
+| `POST` | `/api/orchestrator/session/new` | Create an isolated conversation session |
+| `GET` | `/api/orchestrator/session/{id}/history` | Get message history for a session |
+| `DELETE` | `/api/orchestrator/session/{id}` | Clear/delete conversation session |
+| `GET` | `/api/orchestrator/sessions` | List active sessions |
+| `GET` | `/api/orchestrator/status` | Central Orchestrator & subagent status |
 
 ### Course Management (`/api/courses`)
 
