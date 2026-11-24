@@ -55,6 +55,7 @@ from .session_manager import session_manager, Session
 from .prompts import (
     ORCHESTRATOR_SYSTEM_INSTRUCTION,
     ROUTING_PROMPT,
+    build_domain_descriptions,
     SYNTHESIS_PROMPT,
 )
 
@@ -146,6 +147,7 @@ class CentralOrchestrator:
         if self.client:
             try:
                 prompt = ROUTING_PROMPT.format(
+                    domains=build_domain_descriptions(),
                     history=history_str or "None (New Conversation)",
                     query=query,
                 )
@@ -176,156 +178,60 @@ class CentralOrchestrator:
         # 2. Semantic & Context-Aware Fallback Classifier
         return self._fallback_classify_and_route(query, session)
 
-    def _fallback_classify_and_route(
-        self, query: str, session: Session
-    ) -> IntentResult:
-        """Robust, deterministic intent classifier that inspects domain terms,
+    # Weighted evidence per domain for the deterministic classifier (used when the LLM classifier is unavailable).
+    _DOMAIN_PATTERNS = {
+        "requisition_management_subagent": [
+            (4, r"\bBAR-[A-Z0-9-]+\b"), (4, r"\b(equipment|equipments|apparatus|instrument|instruments|oscilloscope|multimeter|logic analy[sz]er|signal generator|function generator|"
+                                         r"fpga|basys|arduino|raspberry pi|microcontroller|dev(elopment)? board|lab kit|lab (item|gear|device)|barcode|custody|custodian)\b"),
+            (3, r"\b(borrow|borrowed|lend|lent|check ?out|checked out|issue me|issued to|hand ?over)\b.*\b(board|kit|device|item|equipment|scope|meter|analy[sz]er|generator|pi)\b"),
+            (2, r"\b(requisition|requisitions|society|societies|venue|venues|auditorium|seminar hall|conference room|booking|bookings|reservation|reserve|sports?|gym|"
+                r"badminton|squash|tennis|futsal|table tennis|court|facility|facilities|no-?show|check-?in)\b"),
+            (2, r"\b(return|returned|returning)\b.*\b(assigned|borrowed|equipment|board|kit|item|it)\b"), (2, r"\bwho (has|is holding|holds|borrowed|took)\b"),
+            (1, r"\b(unavailable|under repair|in custody|inventory)\b")],
+        "mess_management_subagent": [
+            (4, r"\b(mess|dining|canteen|cafeteria)\b"), (4, r"\b(bill|bills|billing|invoice|invoices|challan|dues|outstanding|security deposit|mess security|refundable|clearance)\b"),
+            (3, r"\b(meal|meals|menu|breakfast|lunch|dinner|calories|protein|carbs|macros?|nutrition(al)?|allerg(en|ens|y|ies)|food|kitchen|turnstile|qr)\b"),
+            (3, r"\bmess[- ]?out\b"), (2, r"\b(attendance|ate|eaten|consumption)\b.*\b(meal|mess|day|month)\b"), (1, r"\b(gate[- ]?pass|headcount|forecast)\b")],
+        "course_management_subagent": [
+            (4, r"(?-i:\b[A-Z]{2,4} ?\d{3}\b)|\b[a-z]{2,4}\d{3}\b"), (4, r"\b(course|courses|prereq(uisite)?s?|enrol(l|ment)|register(ed|ing)? for|registration|drop(ping)? (a |the )?course|add/drop|credit hours?|credits)\b"),
+            (3, r"\b(timetable|time table|class(es)? clash|schedule|lecture|elective|electives|minor|degree|graduation|what-?if|cgpa|gpa|probation|semester|syllabus|curriculum|academic)\b"),
+            (2, r"\b(policy|policies|regulation|handbook|rules?)\b.*\b(academic|exam|attendance|grading|probation|degree|registration)\b")],
+    }
 
-        analyzes multi-turn context, resolves pronoun references, and flags
-        ambiguities or out-of-scope requests.
-        """
-        q_lower = query.lower().strip()
+    def _fallback_classify_and_route(self, query: str, session: Session) -> IntentResult:
+        """Deterministic, evidence-weighted classifier (no LLM). It routes by domain vocabulary and, when evidence is missing or tied, asks the
+        user to clarify instead of silently defaulting to one subagent."""
+        q = query.strip()
+        q_lower = q.lower()
         history = session.get_recent_history(max_turns=6)
 
-        # ── 1. Check Out-of-Scope ─────────────────────────────────────
-        out_of_scope_patterns = [
-            r"\b(weather|forecast in tokyo|weather in|flight|airline|hotel booking|uber|crypto|bitcoin|stock market|world cup|recipe for pizza)\b"
-        ]
-        if any(re.search(pat, q_lower) for pat in out_of_scope_patterns):
-            return IntentResult(
-                intent="out_of_scope",
-                out_of_scope_explanation=(
-                    "I am the **G-Cortex Central Orchestrator** for GIKI. My capabilities are dedicated "
-                    "to university campus operations: **Academic Course Management**, **Campus Dining & Mess Operations**, "
-                    "and **Resource & Requisition Bookings** (sports, venues, lab equipment). "
-                    "I cannot assist with external services such as flights, general weather, or stock markets."
-                ),
-                reasoning="Query outside GIKI campus operations scope",
-            )
+        if re.search(r"\b(weather|flight|airline|hotel booking|uber|crypto|bitcoin|stock market|world cup|recipe for pizza)\b", q_lower):
+            return IntentResult(intent="out_of_scope", out_of_scope_explanation=(
+                "I am the **G-Cortex assistant** for GIKI. I can help with **courses and academics**, the **mess** (bills, security deposit, meals) and **campus resources** "
+                "(sports bookings, venue requisitions, lab equipment). I cannot help with external services such as flights, weather or markets."), reasoning="Outside campus operations")
 
-        # ── 2. Check for Ambiguity ────────────────────────────────────
-        ambiguous_patterns = [
-            r"^(check\s+my\s+status|status|what\s+is\s+my\s+status|show\s+my\s+record|my\s+profile|is\s+it\s+approved|cancel\s+it)$"
-        ]
-        if any(re.match(pat, q_lower) for pat in ambiguous_patterns):
-            # Check if recent history resolves what "it" or "status" refers to
-            last_agent = None
-            for m in reversed(history):
-                if m.routed_to:
-                    last_agent = m.routed_to[0]
-                    break
-            if not last_agent:
-                return IntentResult(
-                    intent="clarification_needed",
-                    clarification_question=(
-                        "I would be glad to check your status! However, I manage multiple campus systems. "
-                        "Could you please clarify which status you would like to view?\n"
-                        "1. **Academic Status** (Course enrollments, prerequisites, CGPA/probation)\n"
-                        "2. **Dining & Mess Status** (Gate-pass rebates credited, recent meal logs)\n"
-                        "3. **Requisitions Status** (Sports bookings, society approvals, equipment in custody)"
-                    ),
-                    reasoning="Query lacks domain context and no prior history exists",
-                )
+        scores = {name: sum(w for w, pat in pats if re.search(pat, q, re.I)) for name, pats in self._DOMAIN_PATTERNS.items()}
+        ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+        top_name, top = ranked[0]
 
-        # ── 3. Check Domain Indicators ─────────────────────────────────
-        course_keywords = [
-            "course", "courses", "prereq", "prerequisite", "prerequisites", "eligib",
-            "enroll", "enrollment", "clash", "clashes", "conflict", "timetable", "schedule",
-            "minor", "degree", "what-if", "graduation", "elective", "electives", "gpa", "cgpa",
-            "probation", "academic", "syllabus", "cs101", "cs102", "cs201", "cs232", "cs271",
-            "cs325", "cs330", "cs412", "ee213", "hu101", "mt101", "mt201"
-        ]
-        mess_keywords = [
-            "mess", "dining", "meal", "meals", "food", "menu", "breakfast", "lunch", "dinner",
-            "rebate", "rebates", "gate-pass", "gate pass", "turnstile", "totp", "qr token", "qr",
-            "calories", "protein", "carbs", "nutrition", "macro", "macros", "allergen", "allergens",
-            "allergy", "kitchen", "headcount", "demand forecast"
-        ]
-        req_keywords = [
-            "requisition", "requisitions", "society", "event", "venue", "auditorium", "seminar",
-            "sports", "gym", "basketball", "badminton", "squash", "tennis", "cricket", "facility",
-            "equipment", "barcode", "checkout", "return", "custody", "zero-trust", "checkin",
-            "check-in", "no-show", "strike", "reserve", "reservation", "booking"
-        ]
+        if top == 0:
+            # follow-ups ("and what about their prerequisites?", "yes") inherit the previous subagent
+            last_agent = next((m.routed_to[0] for m in reversed(history) if m.routed_to and m.routed_to[0] in scores), None)
+            if last_agent and (history and len(q.split()) <= 12):
+                resolved = q
+                codes = re.findall(r"\b([A-Z]{2,4}\d{3})\b", " ".join(m.content for m in history[-3:]), re.I)
+                if last_agent == "course_management_subagent" and codes and re.search(r"\b(their|its|it|them)\b", q_lower):
+                    resolved = f"{q} (regarding {codes[-1].upper()})"
+                return IntentResult(intent="single_subagent", target_subagents=[last_agent], subagent_queries={last_agent: resolved}, reasoning="Follow-up resolved from conversation context")
+            return IntentResult(intent="clarification_needed", reasoning="No domain evidence in the request", clarification_question=(
+                "I can help with:\n1. **Courses & academics** (registration, prerequisites, timetable, policies)\n2. **Mess** (bills, security deposit, meals, menu)\n"
+                "3. **Campus resources** (sports bookings, venue requisitions, lab equipment)\n\nWhich of these is your request about?"))
 
-        has_course = any(kw in q_lower for kw in course_keywords)
-        has_mess = any(kw in q_lower for kw in mess_keywords)
-        has_req = any(kw in q_lower for kw in req_keywords)
-
-        # ── 4. Context Resolution for Follow-up Queries ───────────────
-        follow_up_indicators = [
-            "what are their", "what about their", "its prerequisites", "their prerequisites",
-            "can i take it", "what about tomorrow", "what about dinner", "can i book it"
-        ]
-        is_follow_up = any(fi in q_lower for fi in follow_up_indicators) or (
-            not (has_course or has_mess or has_req) and len(history) > 0
-        )
-
-        resolved_course_query = query
-        resolved_mess_query = query
-        resolved_req_query = query
-
-        if is_follow_up and history:
-            # Look up recent context
-            last_user_or_agent = [m for m in history if m.role in ("user", "assistant")][-3:]
-            context_text = " ".join(m.content for m in last_user_or_agent)
-
-            # Look for course codes in prior messages (e.g. CS325, CS102)
-            found_codes = re.findall(r"\b(CS\d{3}|EE\d{3}|HU\d{3}|MT\d{3})\b", context_text, re.IGNORECASE)
-            if found_codes and ("prereq" in q_lower or "take it" in q_lower or not (has_mess or has_req)):
-                has_course = True
-                target_code = found_codes[-1].upper()
-                resolved_course_query = f"What are the prerequisites and eligibility for {target_code}?"
-
-            # Look for recent subagent routing
-            last_agent = None
-            for m in reversed(history):
-                if m.routed_to:
-                    last_agent = m.routed_to[0]
-                    break
-            if last_agent == "course_management_subagent" and not (has_mess or has_req):
-                has_course = True
-            elif last_agent == "mess_management_subagent" and not (has_course or has_req):
-                has_mess = True
-            elif last_agent == "requisition_management_subagent" and not (has_course or has_mess):
-                has_req = True
-
-        # ── 5. Determine Targets ──────────────────────────────────────
-        targets = []
-        subagent_queries = {}
-
-        if has_course:
-            targets.append("course_management_subagent")
-            subagent_queries["course_management_subagent"] = resolved_course_query
-        if has_mess:
-            targets.append("mess_management_subagent")
-            subagent_queries["mess_management_subagent"] = resolved_mess_query
-        if has_req:
-            targets.append("requisition_management_subagent")
-            subagent_queries["requisition_management_subagent"] = resolved_req_query
-
-        if len(targets) > 1:
-            return IntentResult(
-                intent="multi_subagent",
-                target_subagents=targets,
-                subagent_queries=subagent_queries,
-                reasoning="Query spans multiple subagent domains",
-            )
-        elif len(targets) == 1:
-            return IntentResult(
-                intent="single_subagent",
-                target_subagents=targets,
-                subagent_queries=subagent_queries,
-                reasoning="Query matches single specialized subagent",
-            )
-        else:
-            # Fallback default: general academic advising or query Course Subagent
-            return IntentResult(
-                intent="single_subagent",
-                target_subagents=["course_management_subagent"],
-                subagent_queries={"course_management_subagent": query},
-                reasoning="Defaulting to primary campus advisory subagent",
-            )
+        strong = [n for n, sc in ranked if sc >= 2 and sc >= top - 1]
+        targets = strong if len(strong) > 1 else [top_name]
+        queries = {t: q for t in targets}
+        return IntentResult(intent="multi_subagent" if len(targets) > 1 else "single_subagent", target_subagents=targets, subagent_queries=queries,
+                            reasoning="Deterministic routing by evidence: " + ", ".join(f"{n.split('_')[0]}={sc}" for n, sc in ranked))
 
     # ═══════════════════════════════════════════════════════════════
     #  Subagent Invocation & Error Handling

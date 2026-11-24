@@ -136,14 +136,45 @@ def get_requisition_status(requisition_id: str = "") -> dict:
 
 
 @tool
-def list_available_equipment(search: str = "") -> dict:
-    """Lab equipment inventory with barcodes and availability.
+def list_available_equipment(search: str = "", status: str = "") -> dict:
+    """Lab equipment inventory with barcodes, status and condition. Use status='available' for what can be borrowed and
+    status='in_custody' or 'under_repair' for what is unavailable.
 
     Args:
-        search: Optional text (name, barcode, category).
+        search: Optional text (name, barcode, category), e.g. 'FPGA' or 'oscilloscope'.
+        status: Optional filter: available, in_custody, under_repair.
     """
-    rows = equipment.list_equipment(context().actor, q=search or None)
-    return {"ok": True, "equipment": [{k: r[k] for k in ("barcode", "name", "lab", "status", "condition", "due_date", "overdue") if k in r} for r in rows]}
+    rows = equipment.list_equipment(context().actor, status=status or None, q=search or None)
+    return {"ok": True, "count": len(rows), "equipment": [{k: r[k] for k in ("barcode", "name", "lab", "status", "condition", "due_date", "overdue", "custodian_id", "custodian_name") if k in r} for r in rows]}
+
+
+@tool
+def list_unavailable_equipment() -> dict:
+    """Equipment that cannot currently be borrowed (checked out to someone, or under repair), with when it is due back where known."""
+    rows = [r for r in equipment.list_equipment(context().actor) if r["status"] != "available"]
+    return {"ok": True, "count": len(rows), "equipment": [{k: r[k] for k in ("barcode", "name", "lab", "status", "condition", "due_date", "overdue", "custodian_id", "custodian_name") if k in r} for r in rows]}
+
+
+@tool
+def lookup_equipment_by_barcode(barcode: str) -> dict:
+    """Identify one item by barcode: name, lab, status, condition and (only if you are the custodian or lab staff) who holds it.
+    If custodian fields are empty for an item that is in custody, tell the user that custody details are visible only to the holder and lab staff.
+
+    Args:
+        barcode: e.g. 'BAR-FPGA-302'.
+    """
+    return {"ok": True, "equipment": equipment.lookup(context().actor, barcode)}
+
+
+@tool
+def get_equipment_custody_history(barcode: str = "") -> dict:
+    """Custody history (checkouts, returns, repairs). Students see only their own movements; lab staff see everything.
+
+    Args:
+        barcode: Optional barcode to restrict the history to one item.
+    """
+    rows = equipment.custody_log(context().actor, barcode or None, 50)
+    return {"ok": True, "count": len(rows), "history": [{k: r[k] for k in ("barcode", "name", "action", "condition", "at", "channel", "note") if k in r} for r in rows]}
 
 
 @tool
@@ -183,4 +214,5 @@ def return_lab_equipment(barcode: str, condition: str = "good") -> dict:
 
 REQ_TOOLS = [get_today, list_sports_facilities, check_sports_availability, get_my_booking_quota, book_sports_facility, get_my_bookings,
              cancel_sports_booking, recommend_venue, list_my_societies, submit_society_requisition, get_requisition_status,
-             list_available_equipment, get_my_equipment, checkout_lab_equipment, return_lab_equipment]
+             list_available_equipment, list_unavailable_equipment, lookup_equipment_by_barcode, get_equipment_custody_history,
+             get_my_equipment, checkout_lab_equipment, return_lab_equipment]

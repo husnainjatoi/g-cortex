@@ -26,6 +26,52 @@ Every subagent acts only through backend tools bound to the signed-in user; the 
 5. **Multi-Agent Synthesis**: If a query spans multiple domains (e.g., "What are my classes today and what is for dinner tonight?"), invoke both subagents and combine their findings into a cohesive, structured response.
 """
 
+DOMAIN_SPECS = {
+    "course_management_subagent": {
+        "title": "Course Management Agent",
+        "scope": "Course registration and dropping, course catalogue information, prerequisite checking (DAG), timetable/lecture/lab clash checks, elective "
+                 "recommendations, degree planning (what-if minors), academic record/CGPA and academic policies (Ask GIKI).",
+        "examples": ["Which courses can I register for next semester?", "Register me for CS325", "Do CS330 and CS412 clash?", "What are the prerequisites of CS412?",
+                     "What is the add/drop policy?", "Suggest electives for machine learning", "What if I take the AI minor?"],
+        "tools": "course_tools"},
+    "mess_management_subagent": {
+        "title": "Mess Management Agent",
+        "scope": "Mess information, menus, meal attendance and meal consumption records, monthly mess billing (estimates and invoices), payment receipts, the refundable "
+                 "mess security deposit and final mess clearance, mess-out (absence) declarations, nutritional macros and allergens.",
+        "examples": ["How much is my mess bill this month?", "Show me last month's bill", "How much is my refundable mess security?", "Which meals did I eat this week?",
+                     "I will be away next weekend, record a mess-out", "What are the calories in tonight's dinner?"],
+        "tools": "mess_tools"},
+    "requisition_management_subagent": {
+        "title": "Requisition Management Agent",
+        "scope": "Campus requisitions and their approval workflow, sports facility reservations, venue search/booking, and ALL lab/event EQUIPMENT matters: equipment inventory "
+                 "and availability, barcode lookup, borrowing/issuance, returns, who holds an item (custody) and custody history.",
+        "examples": ["Show me the available lab equipment", "I need to borrow an FPGA development board", "Check who currently has this equipment (barcode)", "What is the status of my equipment request?",
+                     "Return the equipment assigned to me", "Show me the custody history of this barcode", "Which lab equipment is currently unavailable?",
+                     "Book badminton court 1 tomorrow at 17:00", "I need a venue for a society event with 100 participants", "What is the status of my requisition?"],
+        "tools": "req_tools"},
+}
+
+
+def build_domain_descriptions() -> str:
+    """Routing descriptions generated from the REAL tool registries so the prompt always matches what each subagent can actually do."""
+    from app.agents.tools.course_tools import COURSE_TOOLS
+    from app.agents.tools.mess_tools import MESS_TOOLS
+    from app.agents.tools.req_tools import REQ_TOOLS
+    registry = {"course_tools": COURSE_TOOLS, "mess_tools": MESS_TOOLS, "req_tools": REQ_TOOLS}
+    blocks = ["Subagent responsibilities (their tools are listed so you route by what they can really do):"]
+    for name, spec in DOMAIN_SPECS.items():
+        ops = []
+        for t in registry[spec["tools"]]:
+            doc = (t.__doc__ or "").strip().split("\n")[0].split(". ")[0].strip()
+            ops.append(f"    * {t.__name__}: {doc}")
+        blocks.append(f'- "{name}" ({spec["title"]}): {spec["scope"]}\n  Example requests: ' + " | ".join(f'"{e}"' for e in spec["examples"]) + "\n  Supported operations:\n" + "\n".join(ops))
+    blocks.append("Routing rules: anything about equipment, barcodes (BAR-...), boards/kits/instruments, borrowing, lending, returning or custody ALWAYS goes to "
+                  '"requisition_management_subagent" (never to the course agent, even if the equipment is for a course project). Anything about bills, invoices, '
+                  'the mess security deposit, meals eaten or menus goes to "mess_management_subagent". Course codes, registration and prerequisites go to '
+                  '"course_management_subagent". Use "multi_subagent" only when the request genuinely needs several of them.')
+    return "\n\n".join(blocks)
+
+
 ROUTING_PROMPT = """\
 You are the routing and intent classification engine for the G-Cortex Central Orchestrator.
 Analyze the user's latest query in light of the conversation history.
@@ -36,12 +82,7 @@ Conversation History:
 Current User Query:
 "{query}"
 
-Subagent responsibilities:
-- "course_management_subagent": course catalogue, prerequisites, registering/dropping courses, timetable and class clashes, electives,
-  what-if degree/minor planning, grades/CGPA, academic policy questions (Ask GIKI).
-- "mess_management_subagent": dining hall, menus, nutrition macros, allergens, mess-out/leave requests, rebates and rebate history, meal records.
-- "requisition_management_subagent": sports court/gym bookings and quotas, venue recommendations, society event requisitions and their
-  approval status, borrowing/returning lab equipment (barcodes, custody, kits, boards, instruments).
+{domains}
 
 Determine:
 1. The user's underlying intent.

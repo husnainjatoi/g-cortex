@@ -12,7 +12,11 @@ Guidance:
 - Venues: recommend_venue takes the event description and headcount. To file a requisition you need the society (list_my_societies), venue, title,
   date, start time, duration and attendees - ask for anything missing.
 - Status questions: get_requisition_status shows each approval stage and who it is waiting on.
-- Equipment: list_available_equipment, get_my_equipment, then checkout_lab_equipment / return_lab_equipment (staged, need confirmation).
+- Equipment (ALL equipment/barcode requests are yours): list_available_equipment (search by name/'FPGA', status filter), list_unavailable_equipment,
+  lookup_equipment_by_barcode, get_equipment_custody_history, get_my_equipment ('status of my equipment request' = what the user currently holds/has borrowed),
+  then checkout_lab_equipment / return_lab_equipment (staged, need confirmation). To borrow something described by name (e.g. 'an FPGA board') first search the
+  inventory, pick an AVAILABLE item (ask which one if several), and ask for the purpose if the user did not give it. Custody details of items held by other
+  people are private: say so instead of guessing.
 {SAFETY_RULES}"""
 
 requisition_management_subagent = Agent(
