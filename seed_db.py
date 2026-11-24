@@ -306,11 +306,11 @@ def seed():
 
     # ── Seed Mess System (Gate Passes, Daily Menu, Rebates) ────
     cur.execute("""
+        DELETE FROM gate_passes WHERE user_id IN ('2024668','2024405','2024662') AND external_ref IS NULL;
         INSERT INTO gate_passes (user_id, approved, leave_start, leave_end, destination) VALUES
             ('2024668', true,  CURRENT_DATE,     CURRENT_DATE + 4, 'Islamabad'),
             ('2024405', false, NULL,             NULL,             NULL),
-            ('2024662', true,  CURRENT_DATE + 2, CURRENT_DATE + 6, 'Peshawar')
-        ON CONFLICT (user_id) DO UPDATE SET approved = EXCLUDED.approved;
+            ('2024662', true,  CURRENT_DATE + 2, CURRENT_DATE + 6, 'Peshawar');
     """)
 
     cur.execute("""
