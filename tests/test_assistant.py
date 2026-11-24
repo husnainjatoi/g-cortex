@@ -275,3 +275,50 @@ def test_mess_out_via_assistant_is_a_declaration_with_no_rebate(app):
     rec = web.get("/api/mess/mess-out").json()[0]
     assert (rec["start_date"], rec["end_date"], rec["channel"]) == (s, e, "assistant")
     assert db.query_one("SELECT COUNT(*) AS n FROM mess_rebates")["n"] == 0 and db.query_one("SELECT COUNT(*) AS n FROM mess_ledger WHERE status='rebated'")["n"] == 0
+
+
+# ── Official GIKI knowledge through the assistant ───────────
+
+@pytest.fixture
+def official_handbook(database):
+    import socket
+    from app.knowledge import crawler
+    from app.services import knowledge
+    try:
+        socket.create_connection(("giki.edu.pk", 443), timeout=6).close()
+    except OSError:
+        pytest.skip("giki.edu.pk not reachable")
+    res = knowledge.ingest_url(crawler.OfficialFetcher(delay=1.5), "https://giki.edu.pk/wp-content/uploads/2023/10/GIK-Institute-Student-Handbook-2023-24-General-Rules-Policies-and-Disicpline.pdf", force=True)
+    assert res["result"] in ("added", "updated")
+
+
+def test_assistant_answers_policy_from_official_source_and_admits_gaps(app, official_handbook):
+    chat = Chat(session(app, "u2024405@giki.edu.pk"))
+    out = chat.say("What is the add/drop policy at GIKI?")
+    assert out["routed_to"] == ["course_management_subagent"]
+    r = out["reply"].lower()
+    assert "three weeks" in r or "first three" in r or "3 weeks" in r
+    assert "handbook" in r or "giki.edu.pk" in r                                    # the official source is cited
+    gap = Chat(session(app, "u2024405@giki.edu.pk")).say("What does GIKI policy say about bringing pet dragons into the hostel?")
+    g = gap["reply"].lower()
+    assert any(k in g for k in ("not find", "couldn't find", "could not find", "not covered", "no information", "not mentioned", "does not")), gap["reply"]
+
+
+def test_assistant_uses_imported_official_course_data(app):
+    from app.knowledge.catalog_parser import parse_courses
+    from app.services import catalog_import
+    from tests.test_knowledge import PROSPECTUS, SRC
+    catalog_import.import_courses(None, parse_courses(PROSPECTUS)["courses"], SRC)
+    try:
+        chat = Chat(session(app, "u2024405@giki.edu.pk"))
+        out = chat.say("What are the prerequisites for CS112 Object-Oriented Programming?")
+        assert out["routed_to"] == ["course_management_subagent"] and "CS103" in out["reply"]
+        reg = chat.say("Register me for CS112.")
+        assert reg["pending_actions"] == []                                            # catalogue-only course: backend refuses
+        chat.say("yes")
+        assert enrolled("2024405") == []
+        assert any("not" in reg["reply"].lower() and ("offered" in reg["reply"].lower() or "schedul" in reg["reply"].lower()) for _ in [0]), reg["reply"]
+    finally:
+        with db.tx() as cur:
+            cur.execute("DELETE FROM course_import_flags"); cur.execute("DELETE FROM course_prerequisites WHERE course_code IN ('CS103','CS112','CS131','CS999')")
+            cur.execute("DELETE FROM course_sources"); cur.execute("DELETE FROM courses WHERE catalog_only")
