@@ -54,8 +54,8 @@ def test_student_cannot_reach_admin_apis(app):
     c, _ = login(app, "u2024405@giki.edu.pk")
     for method, path, body in [("get", "/api/admin/users", None), ("get", "/api/admin/reports/overview", None), ("get", "/api/admin/audit", None),
                                ("post", "/api/admin/courses", {"course_code": "ZZ900", "title": "x", "credits": 3}),
-                               ("delete", "/api/admin/courses/CS101", None), ("put", "/api/admin/settings/mess_daily_rate", {"value": "1"}),
-                               ("get", "/api/mess/admin/mess-out", None), ("get", "/api/mess/admin/attendance", None),
+                               ("delete", "/api/admin/courses/CS101", None), ("put", "/api/admin/settings/mess_deposit_amount", {"value": "1"}),
+                               ("get", "/api/mess/admin/invoices", None), ("get", "/api/mess/admin/attendance", None),
                                ("get", "/api/req/admin/bookings", None), ("post", "/api/req/admin/auto-release", None),
                                ("get", "/api/req/requisitions?scope=all", None)]:
         r = getattr(c, method)(path, **({"json": body} if body else {}))
@@ -65,8 +65,8 @@ def test_student_cannot_reach_admin_apis(app):
 def test_scoped_admins_are_separated(app):
     mess, _ = login(app, "mess@giki.edu.pk")
     acad, _ = login(app, "registrar@giki.edu.pk")
-    assert mess.get("/api/mess/admin/mess-out").status_code == 200
-    assert acad.get("/api/mess/admin/mess-out").status_code == 403
+    assert mess.get("/api/mess/admin/invoices").status_code == 200
+    assert acad.get("/api/mess/admin/invoices").status_code == 403
     assert acad.post("/api/admin/courses", json={"course_code": "ZZ901", "title": "Scoped", "credits": 2}).status_code == 200
     assert mess.post("/api/admin/courses", json={"course_code": "ZZ902", "title": "Scoped", "credits": 2}).status_code == 403
     assert mess.get("/api/admin/users").status_code == 403
@@ -74,7 +74,7 @@ def test_scoped_admins_are_separated(app):
 
 def test_student_cannot_read_another_students_records(app):
     c, _ = login(app, "u2024405@giki.edu.pk")
-    for path in ("/api/courses/me/registrations?student_id=2024668", "/api/mess/me/rebates?student_id=2024668",
+    for path in ("/api/courses/me/registrations?student_id=2024668", "/api/mess/me/deposit?student_id=2024668",
                  "/api/mess/mess-out?student_id=2024668", "/api/req/sports/bookings?student_id=2024668", "/api/courses/me/record?student_id=2024668"):
         assert c.get(path).status_code == 403, path
     assert c.post("/api/courses/CS271/register", json={"student_id": "2024668"}).status_code == 403
@@ -113,23 +113,44 @@ def test_admin_adds_course_student_sees_it_and_can_register(app):
     assert adm.post("/api/admin/courses", json={"course_code": "bad", "title": "x", "credits": 3}).status_code == 422
 
 
-def test_mess_out_flow_over_http(app):
+def test_mess_out_declaration_and_no_rebate_endpoints_over_http(app):
+    import datetime
+    from app.services import clock
+    stu, _ = login(app, "u2024405@giki.edu.pk")
+    s = (clock.today() + datetime.timedelta(days=3)).isoformat()
+    e = (clock.today() + datetime.timedelta(days=5)).isoformat()
+    sub = stu.post("/api/mess/mess-out", json={"start_date": s, "end_date": e, "reason": "home"}).json()
+    assert sub["status"] == "recorded" and "rebate" not in str(sub).lower()
+    assert stu.post("/api/mess/mess-out", json={"start_date": s, "end_date": e}).status_code == 409           # overlap
+    for path in ("/api/mess/me/rebates", "/api/mess/admin/summary/rebates"):
+        assert stu.get(path).status_code == 404
+    adm, _ = login(app, "mess@giki.edu.pk")
+    assert adm.post(f"/api/mess/admin/mess-out/{sub['request_id']}/decision", json={"approve": True}).status_code in (404, 405)
+
+
+def test_billing_flow_over_http(app):
+    import datetime
+    from app import db
     from app.services import clock
     stu, _ = login(app, "u2024405@giki.edu.pk")
     adm, _ = login(app, "mess@giki.edu.pk")
-    import datetime
-    s = (clock.today() + datetime.timedelta(days=3)).isoformat()
-    e = (clock.today() + datetime.timedelta(days=5)).isoformat()
-    pv = stu.post("/api/mess/mess-out/preview", json={"start_date": s, "end_date": e}).json()
-    assert pv["eligible"] and pv["rebate_pkr"] == 1350
-    bad = stu.post("/api/mess/mess-out", json={"start_date": clock.today().isoformat(), "end_date": e})
-    assert bad.status_code == 409
-    sub = stu.post("/api/mess/mess-out", json={"start_date": s, "end_date": e, "reason": "home"}).json()
-    assert sub["status"] == "pending"
-    assert any(r["request_id"] == sub["request_id"] for r in adm.get("/api/mess/admin/mess-out?status=pending").json())
-    assert adm.post(f"/api/mess/admin/mess-out/{sub['request_id']}/decision", json={"approve": True}).status_code == 200
-    assert stu.get("/api/mess/me/rebates").json()["total_credited_pkr"] == 1350
-    assert stu.get("/api/portal/notifications").json()["unread"] >= 1
+    for m, r in (("breakfast", 40), ("lunch", 100), ("dinner", 90)):
+        assert adm.put("/api/mess/admin/rates", json={"meal_type": m, "rate_pkr": r, "effective_from": "2026-01-01"}).status_code == 200
+    assert stu.put("/api/mess/admin/rates", json={"meal_type": "lunch", "rate_pkr": 1}).status_code == 403
+    first = clock.today().replace(day=1)
+    with db.tx() as cur:
+        cur.execute("INSERT INTO mess_ledger (user_id, meal_date, meal_type, status, source) VALUES ('2024405', %s, 'lunch', 'consumed', 'turnstile'), ('2024405', %s, 'dinner', 'consumed', 'turnstile')", (first, first))
+    bill = stu.get("/api/mess/me/bill").json()
+    assert bill["kind"] == "estimate" and bill["amount_pkr"] == 190 and bill["days_consumed"] == 1
+    assert stu.get("/api/mess/me/bill?student_id=2024668").status_code == 403
+    assert stu.get("/api/mess/me/invoices").json() == []
+    assert stu.post("/api/mess/admin/invoices/generate", json={"month": first.strftime("%Y-%m")}).status_code == 403
+    assert adm.post("/api/mess/admin/invoices/generate", json={"month": first.strftime("%Y-%m")}).status_code == 409   # month still open
+    assert stu.get("/api/mess/me/deposit").json()["status"] == "not_configured"
+    assert stu.get("/api/mess/admin/deposits").status_code == 403
+    assert stu.post("/api/mess/me/clearance").json()["status"] == "requested"
+    assert stu.get("/api/mess/admin/clearances").status_code == 403
+    assert adm.get("/api/mess/admin/clearances").status_code == 200
 
 
 def test_qr_endpoint_and_turnstile_authorisation(app, monkeypatch):

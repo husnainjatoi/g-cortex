@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from app import config, db
 from app.api import admin_router, auth_router, course_router, mess_router, orchestrator_router, portal_router, req_router
 from app.api.deps import csrf_guard, service_error_handler
-from app.services import events, sports
+from app.services import billing, events, sports
 from app.services.errors import ServiceError
 
 logger = logging.getLogger("g_cortex.main")
@@ -29,6 +29,10 @@ async def _background_jobs():
         try:
             await asyncio.to_thread(sports.auto_release, None)
             await asyncio.to_thread(events.retry_failed)
+            try:  # idempotent: no-op once last month is invoiced or when rates are not configured yet
+                await asyncio.to_thread(billing.generate_monthly_invoices, None)
+            except ServiceError:
+                pass
         except Exception:
             logger.exception("background job failed")
         await asyncio.sleep(60)

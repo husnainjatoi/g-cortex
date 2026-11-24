@@ -1,6 +1,13 @@
-"""Mess Management tools - thin adapters over app.services.mess."""
+"""Mess Management tools - thin adapters over app.services.mess and app.services.billing (monthly bills, deposit)."""
 from app.agents.runtime import context, propose, tool
-from app.services import clock, mess
+from app.services import billing, clock, mess
+
+
+@tool
+def get_today() -> dict:
+    """Today's date, weekday and current month. Use it to resolve 'tomorrow', 'next Friday', 'this month', 'last month'."""
+    t = clock.today()
+    return {"ok": True, "today": t.isoformat(), "weekday": t.strftime("%A"), "current_month": t.strftime("%Y-%m")}
 
 
 @tool
@@ -17,9 +24,80 @@ def get_menu_and_macros(meal: str = "") -> dict:
 
 
 @tool
+def get_my_estimated_mess_bill(month: str = "") -> dict:
+    """Your mess bill for a month, calculated by the backend from your VERIFIED meal-attendance records and the configured
+    rates. For the current/open month this is an ESTIMATE; for a month already invoiced it is the finalized invoice. Report
+    the numbers and the 'explanation' exactly; never calculate prices yourself, and say so if rates are not configured.
+
+    Args:
+        month: Optional YYYY-MM (empty = current month). For 'last month' pass the previous month's YYYY-MM using get_today.
+    """
+    return {"ok": True, **billing.estimate_bill(context().actor, None, month or None)}
+
+
+@tool
+def get_my_mess_invoices() -> dict:
+    """All your finalized monthly mess invoices with totals, paid amounts, balances and status (unpaid/partial/paid)."""
+    inv = billing.my_invoices(context().actor)
+    return {"ok": True, "invoices": [{k: i[k] for k in ("invoice_no", "billing_month_label", "days_count", "total_pkr", "paid_pkr", "balance_pkr", "status", "due_date", "overdue")} for i in inv]}
+
+
+@tool
+def get_my_mess_invoice(invoice_no: str) -> dict:
+    """One finalized invoice with consumption lines, adjustments and payment history.
+
+    Args:
+        invoice_no: e.g. 'INV-202611-2024405'.
+    """
+    return {"ok": True, "invoice": billing.get_invoice(context().actor, invoice_no)}
+
+
+@tool
+def get_my_security_deposit() -> dict:
+    """Your refundable mess security deposit: original amount, payment status, verified payments, deductions, refundable balance,
+    outstanding bills, transaction history and any final-clearance status. The deposit is NOT prepaid credit."""
+    d = billing.deposit_summary(context().actor)
+    d["transactions"] = [{k: t[k] for k in ("kind", "amount_pkr", "status", "reference", "recorded_at")} for t in d["transactions"]]
+    return {"ok": True, **d}
+
+
+@tool
+def get_my_outstanding_mess_dues() -> dict:
+    """Total unpaid mess invoices plus what is still payable on each."""
+    inv = [i for i in billing.my_invoices(context().actor) if i["balance_pkr"] > 0]
+    return {"ok": True, "outstanding_total_pkr": round(sum(i["balance_pkr"] for i in inv), 2),
+            "unpaid_invoices": [{k: i[k] for k in ("invoice_no", "billing_month_label", "balance_pkr", "due_date", "status", "overdue")} for i in inv]}
+
+
+@tool
+def submit_mess_payment_receipt(invoice_no: str, amount_pkr: float, reference: str) -> dict:
+    """Submit a bank-challan payment receipt reference for one of your invoices (asks the user to confirm; the Mess Office then
+    verifies it). This does NOT move money - G-Cortex does not process payments.
+
+    Args:
+        invoice_no: e.g. 'INV-202611-2024405'.
+        amount_pkr: Amount paid.
+        reference: The bank transaction/receipt reference.
+    """
+    inv = billing.get_invoice(context().actor, invoice_no)
+    if inv["balance_pkr"] <= 0:
+        return {"ok": False, "error": f"{inv['invoice_no']} has nothing outstanding."}
+    return propose("submit_mess_payment_receipt", {"invoice_no": inv["invoice_no"], "amount_pkr": float(amount_pkr), "reference": reference},
+                   f"Submit receipt {reference} for PKR {float(amount_pkr):.2f} against {inv['invoice_no']} (balance PKR {inv['balance_pkr']:.2f}) for Mess Office verification.")
+
+
+@tool
+def request_final_mess_clearance() -> dict:
+    """Start the final mess clearance (graduation) workflow: shows the settlement preview and, after the user confirms, files the
+    request for Mess Office review. No refund is issued automatically."""
+    p = billing.clearance_preview(context().actor)
+    return propose("request_mess_clearance", {}, f"File a final mess clearance request. Current preview: deposit PKR {p['deposit_balance_pkr']:.2f}, dues PKR {p['total_dues_pkr']:.2f}, "
+                   f"refundable PKR {p['refundable_pkr']:.2f}, additional due PKR {p['additional_due_pkr']:.2f}. The Mess Office must review and process it.")
+
+
+@tool
 def preview_mess_out(start_date: str, end_date: str) -> dict:
-    """Check a mess-out period against the rules (notice period, minimum days, overlaps) and compute the rebate.
-    Changes nothing. Dates are YYYY-MM-DD; today is provided by get_today.
+    """Check a mess-out (absence declaration) for validity. It is only informational for kitchen planning and has NO effect on billing.
 
     Args:
         start_date: First day away, YYYY-MM-DD.
@@ -30,8 +108,8 @@ def preview_mess_out(start_date: str, end_date: str) -> dict:
 
 @tool
 def submit_mess_out_request(start_date: str, end_date: str, reason: str = "") -> dict:
-    """Request a mess-out for the dates. Validates the rules, then asks the user to confirm; the request is only
-    created after confirmation.
+    """Declare a mess-out (period you will be away) for kitchen planning; asks the user to confirm. It does not change the bill -
+    students are billed only for meals actually eaten.
 
     Args:
         start_date: First day away, YYYY-MM-DD.
@@ -42,39 +120,32 @@ def submit_mess_out_request(start_date: str, end_date: str, reason: str = "") ->
     if not ev["eligible"]:
         return {"ok": False, "refused_by_backend": True, "error": " ".join(ev["problems"]), "details": ev}
     return propose("submit_mess_out_request", {"start_date": ev["start_date"], "end_date": ev["end_date"], "reason": reason or None},
-                   f"Submit a mess-out for {ev['start_date']} to {ev['end_date']} ({ev['days']} days). Rebate PKR {ev['rebate_pkr']:.0f}; "
-                   f"{ev['outcome_if_submitted']}.")
+                   f"Record a mess-out for {ev['start_date']} to {ev['end_date']} ({ev['days']} days). This does not affect your bill.")
 
 
 @tool
 def get_my_mess_out_history() -> dict:
-    """Your previous, ongoing, upcoming and pending mess-out requests with rebate amounts."""
-    return {"ok": True, "requests": mess.list_mess_out(context().actor)}
+    """Your mess-out declarations (past, ongoing, upcoming)."""
+    return {"ok": True, "records": mess.list_mess_out(context().actor)}
 
 
 @tool
 def cancel_mess_out_request(request_id: int) -> dict:
-    """Cancel one of your mess-out requests that has not started yet (asks the user to confirm first).
+    """Cancel a mess-out declaration that has not started (asks the user to confirm first).
 
     Args:
-        request_id: The mess-out request number.
+        request_id: The mess-out number.
     """
     mine = {r["request_id"]: r for r in mess.list_mess_out(context().actor)}
     r = mine.get(int(request_id))
     if not r:
-        return {"ok": False, "error": f"You have no mess-out request #{request_id}."}
+        return {"ok": False, "error": f"You have no mess-out #{request_id}."}
     return propose("cancel_mess_out_request", {"request_id": int(request_id)}, f"Cancel mess-out #{request_id} ({r['start_date']} to {r['end_date']}).")
 
 
 @tool
-def get_my_rebate_ledger() -> dict:
-    """Your rebate transactions and the total rebate credited."""
-    return {"ok": True, **mess.rebate_ledger(context().actor)}
-
-
-@tool
 def get_my_meal_records(days: int = 14) -> dict:
-    """Your recent meal records (consumed / rebated) with daily nutritional totals.
+    """Your recent verified meal records with daily nutritional totals (what you actually ate).
 
     Args:
         days: How many past days to include (1-180).
@@ -84,7 +155,7 @@ def get_my_meal_records(days: int = 14) -> dict:
 
 @tool
 def get_my_mess_profile() -> dict:
-    """Allergies, gate-passes, active mess-outs and rebate summary for you."""
+    """Allergies, gate-passes, mess-out records, current-month bill snapshot and outstanding bills for you."""
     return {"ok": True, **mess.profile(context().actor)}
 
 
@@ -99,12 +170,6 @@ def forecast_kitchen_demand(meal: str, date: str = "") -> dict:
     return {"ok": True, **mess.forecast(context().actor, meal, date or None)}
 
 
-@tool
-def get_today() -> dict:
-    """Today's date, weekday and the earliest valid mess-out start date. Use it to resolve 'tomorrow', 'next Friday', etc."""
-    t = clock.today()
-    return {"ok": True, "today": t.isoformat(), "weekday": t.strftime("%A")}
-
-
-MESS_TOOLS = [get_today, get_menu_and_macros, preview_mess_out, submit_mess_out_request, get_my_mess_out_history, cancel_mess_out_request,
-              get_my_rebate_ledger, get_my_meal_records, get_my_mess_profile, forecast_kitchen_demand]
+MESS_TOOLS = [get_today, get_menu_and_macros, get_my_estimated_mess_bill, get_my_mess_invoices, get_my_mess_invoice, get_my_security_deposit,
+              get_my_outstanding_mess_dues, submit_mess_payment_receipt, request_final_mess_clearance, preview_mess_out, submit_mess_out_request,
+              get_my_mess_out_history, cancel_mess_out_request, get_my_meal_records, get_my_mess_profile, forecast_kitchen_demand]
