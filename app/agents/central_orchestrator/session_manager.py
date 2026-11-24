@@ -97,30 +97,35 @@ class SessionManager:
             self._sessions[session.session_id] = session
             return session
 
-    def get_session(self, session_id: str) -> Optional[Session]:
+    def get_session(self, session_id: str, user_id: Optional[str] = None) -> Optional[Session]:
+        """Return the session; when user_id is given it must own the session (otherwise behaves as not found)."""
         with self._lock:
-            return self._sessions.get(session_id)
+            s = self._sessions.get(session_id)
+            if s is not None and user_id is not None and s.user_id != user_id:
+                return None
+            return s
 
     def get_or_create_session(
         self, session_id: Optional[str] = None, user_id: str = "student_default"
     ) -> Session:
         with self._lock:
-            if session_id and session_id in self._sessions:
-                return self._sessions[session_id]
-            new_session = Session(
-                session_id=session_id or str(uuid.uuid4()), user_id=user_id
-            )
+            existing = self._sessions.get(session_id) if session_id else None
+            if existing is not None and existing.user_id == user_id:
+                return existing
+            # unknown id, or an id owned by someone else: never reuse it - start a fresh session for THIS user
+            new_session = Session(user_id=user_id)
             self._sessions[new_session.session_id] = new_session
             return new_session
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, user_id: Optional[str] = None) -> bool:
         with self._lock:
-            if session_id in self._sessions:
+            s = self._sessions.get(session_id)
+            if s is not None and (user_id is None or s.user_id == user_id):
                 del self._sessions[session_id]
                 return True
             return False
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
+    def list_sessions(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._lock:
             return [
                 {
@@ -130,7 +135,7 @@ class SessionManager:
                     "last_active": s.last_active,
                     "message_count": len(s.messages),
                 }
-                for s in self._sessions.values()
+                for s in self._sessions.values() if user_id is None or s.user_id == user_id
             ]
 
     def clear_all(self) -> None:

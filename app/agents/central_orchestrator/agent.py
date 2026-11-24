@@ -45,10 +45,11 @@ from app.agents.course_management_agent.agent import root_agent as course_agent
 from app.agents.mess_management_agent.agent import root_agent as mess_agent
 from app.agents.requisition_management_agent.agent import root_agent as req_agent
 
-# Import direct tools as fallback if remote LLM throws 503 or quota limits
-from app.agents.course_management_agent import agent as course_tools
-from app.agents.mess_management_agent import agent as mess_tools
-from app.agents.requisition_management_agent import agent as req_tools
+from app.agents import runtime
+from app.config import ASSISTANT_MODEL
+from app.services import pending_actions
+from app.services.actor import Actor
+from app.services.errors import ServiceError
 
 from .session_manager import session_manager, Session
 from .prompts import (
@@ -84,7 +85,7 @@ class IntentResult:
 class CentralOrchestrator:
     """Intelligent Central Orchestrator for the G-Cortex Campus Operating System."""
 
-    def __init__(self, model_name: str = "gemini-3.5-flash-lite"):
+    def __init__(self, model_name: str = ASSISTANT_MODEL):
         self.model_name = model_name
         self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
@@ -326,233 +327,38 @@ class CentralOrchestrator:
     #  Subagent Invocation & Error Handling
     # ═══════════════════════════════════════════════════════════════
 
-    async def invoke_subagent(
-        self, subagent_name: str, query: str, user_id: str = "student_default"
-    ) -> str:
-        """Executes a subagent with the user's query and returns its formatted response."""
-        logger.info(f"Invoking {subagent_name} with query: {query}")
+    async def invoke_subagent(self, subagent_name: str, query: str, session: Session, actor: Actor) -> str:
+        """Run a specialised subagent for the authenticated user.
 
-        # Try ADK Runner first if runner and client exist
-        if subagent_name in self.runners and self.client:
-            try:
-                runner = self.runners[subagent_name]
-                ss = self.session_services[subagent_name]
-                app_name = f"gcortex_{subagent_name}"
-                session = await ss.create_session(app_name=app_name, user_id=user_id)
-
-                msg = types.Content(
-                    role="user", parts=[types.Part.from_text(text=query)]
-                )
-                chunks = []
-
-                # Execute with 25-second timeout to handle transient latency
-                async def _stream_runner():
-                    async for event in runner.run_async(
-                        user_id=user_id, session_id=session.id, new_message=msg
-                    ):
-                        if hasattr(event, "content") and event.content:
-                            for p in getattr(event.content, "parts", []):
-                                if getattr(p, "text", None):
-                                    chunks.append(p.text)
-
-                await asyncio.wait_for(_stream_runner(), timeout=25.0)
-                full_reply = "".join(chunks).strip()
-                if full_reply:
-                    return full_reply
-
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"ADK runner for {subagent_name} timed out. Using direct tool dispatcher."
-                )
-            except Exception as e:
-                logger.warning(
-                    f"ADK runner for {subagent_name} encountered error ({e}). Using direct tool dispatcher."
-                )
-
-        # Resilient Direct Tool Dispatcher (Queries real PostgreSQL database)
-        return await asyncio.to_thread(
-            self._dispatch_direct_subagent_tool, subagent_name, query, user_id
-        )
-
-    def _dispatch_direct_subagent_tool(
-        self, subagent_name: str, query: str, user_id: str
-    ) -> str:
-        """Direct, reliable tool dispatcher that queries the PostgreSQL database
-
-        and formats real data when remote LLM runners face 503s or rate limits.
+        The user's identity is bound through `runtime.set_context` (server-side); the subagent's tools can only act as that user and
+        every state-changing tool merely stages an action for the user to confirm. There is NO simulated fallback: if the model
+        service is unavailable the user is told so, rather than being shown invented data.
         """
-        q_lower = query.lower()
-        std_id = "2021001" if user_id == "student_default" else user_id
+        logger.info("Invoking %s for %s", subagent_name, actor.user_id)
+        runner = self.runners.get(subagent_name)
+        if runner is None or self.client is None:
+            raise RuntimeError("The AI model service is not configured.")
+        token = runtime.set_context(actor, session.session_id)
+        try:
+            adk_session_id = f"{session.session_id}:{subagent_name}"
+            msg = types.Content(role="user", parts=[types.Part.from_text(text=query)])
+            chunks: List[str] = []
 
-        # ── Course Management Subagent ──
-        if subagent_name == "course_management_subagent":
-            # 1. Prerequisite query
-            code_match = re.search(r"\b(CS\d{3}|EE\d{3}|HU\d{3}|MT\d{3})\b", query, re.I)
-            if "prereq" in q_lower:
-                code = code_match.group(1).upper() if code_match else "CS325"
-                res = course_tools.get_prerequisite_chain(code)
-                chain = res.get("prerequisite_chain", [])
-                lines = [f"### 📚 Prerequisite Chain for {code} ({res.get('title', '')})"]
-                if not chain:
-                    lines.append(f"✅ **{code}** has no prerequisites.")
-                else:
-                    lines.append("Prerequisite dependencies:")
-                    for p in chain:
-                        lines.append(f"- **{p['course_code']}**: {p['title']}")
-                        for sub in p.get("prerequisites", []):
-                            lines.append(f"  └── **{sub['course_code']}**: {sub['title']}")
-                return "\n".join(lines)
+            async def _stream():
+                async for event in runner.run_async(user_id=actor.user_id, session_id=adk_session_id, new_message=msg):
+                    content = getattr(event, "content", None)
+                    if content and getattr(event, "is_final_response", lambda: True)():
+                        for part in getattr(content, "parts", None) or []:
+                            if getattr(part, "text", None):
+                                chunks.append(part.text)
 
-            # 2. Eligibility
-            if "eligib" in q_lower or "can i take" in q_lower or "enroll" in q_lower:
-                code = code_match.group(1).upper() if code_match else "CS325"
-                res = course_tools.check_enrollment_eligibility(std_id, code)
-                eligible = res.get("eligible", False)
-                status_icon = "✅" if eligible else "❌"
-                return (
-                    f"### {status_icon} Enrollment Eligibility: {code}\n"
-                    f"- **Student ID:** {std_id}\n"
-                    f"- **Eligible:** {'Yes' if eligible else 'No'}\n"
-                    f"- **Details:** {res.get('reason', '')}"
-                )
-
-            # 3. Schedule conflicts
-            if "clash" in q_lower or "conflict" in q_lower or "timetable" in q_lower:
-                code = code_match.group(1).upper() if code_match else "CS311"
-                res = course_tools.detect_schedule_conflicts(std_id, code)
-                conflicts = res.get("has_conflicts", False)
-                icon = "⚠️" if conflicts else "✅"
-                return (
-                    f"### {icon} Timetable Conflict Check: {code}\n"
-                    f"- **Student ID:** {std_id}\n"
-                    f"- **Clash Detected:** {'Yes' if conflicts else 'No'}\n"
-                    f"- **Summary:** {res.get('details', 'No schedule clashes detected.')}"
-                )
-
-            # 4. What-If Minor Simulator
-            if "minor" in q_lower or "what-if" in q_lower or "degree" in q_lower:
-                res = course_tools.simulate_what_if_degree(std_id, "Artificial Intelligence")
-                return (
-                    f"### 🎓 Minor Track Simulation: {res.get('target_minor', 'AI')}\n"
-                    f"- **Credits Earned:** {res.get('credits_earned', 0)}\n"
-                    f"- **Progress:** {res.get('progress_percentage', '0%')}\n"
-                    f"- **Status:** {res.get('status', 'In Progress')}"
-                )
-
-            # 5. Policy Engine
-            if "policy" in q_lower or "probation" in q_lower or "cgpa" in q_lower or "rule" in q_lower:
-                res = course_tools.ask_giki_policy(query)
-                return (
-                    f"### 📖 GIKI Academic Policy Notice\n"
-                    f"{res.get('answer', 'GIKI academic regulations stipulate maintaining a CGPA of 2.0 or higher to avoid academic probation.')}"
-                )
-
-            # Default: Catalog list
-            res = course_tools.list_all_courses()
-            courses = res.get("courses", [])
-            lines = [f"### 📋 GIKI Course Catalog ({len(courses)} Courses)"]
-            for c in courses[:8]:
-                c_code = c.get("code") or c.get("course_code") or "N/A"
-                lines.append(f"- **{c_code}** {c.get('title', '')} ({c.get('credits', 3)} cr)")
-            return "\n".join(lines)
-
-        # ── Mess Management Subagent ──
-        elif subagent_name == "mess_management_subagent":
-            # 1. Menu & Macros
-            period = "dinner" if "dinner" in q_lower else ("lunch" if "lunch" in q_lower else "breakfast")
-            if "menu" in q_lower or "food" in q_lower or "eat" in q_lower or "macro" in q_lower or "calorie" in q_lower:
-                res = mess_tools.check_menu_macros_and_allergens(period, std_id)
-                items = ", ".join(res.get("menu_items", []))
-                macros = res.get("macros", {})
-                return (
-                    f"### 🍽️ {period.capitalize()} Menu & Nutritional Breakdown\n"
-                    f"- **Menu Items:** {items}\n"
-                    f"- **Calories:** {macros.get('calories_kcal', 'N/A')} kcal\n"
-                    f"- **Protein:** {macros.get('protein_g', 'N/A')}g | **Carbs:** {macros.get('carbs_g', 'N/A')}g | **Fat:** {macros.get('fat_g', 'N/A')}g\n"
-                    f"- **Allergen Shield:** {res.get('allergen_shield_status', 'Safe')}"
-                )
-
-            # 2. Kitchen Demand Forecast
-            if "forecast" in q_lower or "kitchen" in q_lower or "headcount" in q_lower:
-                res = mess_tools.forecast_kitchen_demand(period)
-                return (
-                    f"### 📊 Kitchen Demand Forecast ({period.capitalize()})\n"
-                    f"- **Total Capacity:** {res.get('total_students_enrolled', 0)}\n"
-                    f"- **Projected Headcount:** {res.get('projected_headcount', 0)}\n"
-                    f"- **Expected Food Waste Reduction:** 18%"
-                )
-
-            # 3. QR Token
-            if "qr" in q_lower or "turnstile" in q_lower or "token" in q_lower:
-                res = mess_tools.generate_totp_meal_qr(std_id, period)
-                return (
-                    f"### 📱 Turnstile Entry QR Token\n"
-                    f"- **Token:** `{res.get('qr_token', 'N/A')}`\n"
-                    f"- **Meal Period:** {period.capitalize()}\n"
-                    f"- **Validity:** 30 seconds (Anti-passback active)"
-                )
-
-            # 4. Rebates & Profile
-            res = mess_tools.get_student_mess_profile(std_id)
-            return (
-                f"### 💳 Student Mess & Rebate Profile\n"
-                f"- **Student ID:** {std_id}\n"
-                f"- **Gate-Pass Active:** {'Yes' if res.get('campus_gate_pass_active') else 'No'}\n"
-                f"- **Total Rebates Credited:** PKR {res.get('total_rebate_credited_pkr', 0)}\n"
-                f"- **Summary:** {res.get('billing_summary', 'Standing normal.')}"
-            )
-
-        # ── Requisition Management Subagent ──
-        elif subagent_name == "requisition_management_subagent":
-            # 1. Venue Recommendation
-            if "venue" in q_lower or "hall" in q_lower or "recommend" in q_lower or "seminar" in q_lower:
-                res = req_tools.recommend_venue(
-                    event_description=query, expected_attendees=80, required_facilities="projector, audio"
-                )
-                rec = res.get("top_recommendation", {})
-                return (
-                    f"### 🏛️ Campus Venue Recommendation\n"
-                    f"- **Recommended Venue:** **{rec.get('venue_name', 'Auditorium')}** (`{rec.get('venue_id', 'AUD_1')}`)\n"
-                    f"- **Capacity:** {rec.get('capacity', 250)} seats\n"
-                    f"- **Suitability Score:** {rec.get('match_score', '95%')}\n"
-                    f"- **Reason:** {res.get('recommendation_reason', 'Matches capacity and AV requirements.')}"
-                )
-
-            # 2. Sports Facility Availability / Reservation
-            if "sport" in q_lower or "gym" in q_lower or "badminton" in q_lower or "squash" in q_lower or "court" in q_lower:
-                facility = "Badminton Court 1" if "badminton" in q_lower else ("Squash Court 1" if "squash" in q_lower else "Gym")
-                res = req_tools.check_sports_facility_availability(facility, "2026-11-25")
-                slots = res.get("available_slots", [])
-                slots_str = ", ".join(slots[:5]) if slots else "Slots open upon booking"
-                return (
-                    f"### 🏸 Sports Facility Availability: {facility}\n"
-                    f"- **Fair-Use Limit:** Max 2.0 hours/day per student\n"
-                    f"- **Open Slots:** {slots_str}\n"
-                    f"- **Zero-Trust Check-in:** 15-minute grace period"
-                )
-
-            # 3. Equipment Custody
-            if "equipment" in q_lower or "barcode" in q_lower or "mic" in q_lower or "projector" in q_lower:
-                res = req_tools.query_equipment_custody("BAR-MIC-301")
-                return (
-                    f"### 📦 Lab & Event Equipment Status\n"
-                    f"- **Barcode:** `BAR-MIC-301`\n"
-                    f"- **Item:** Shure Wireless Microphone\n"
-                    f"- **Custody Status:** {res.get('status', 'available')}\n"
-                    f"- **Location:** Electrical Engineering Depository"
-                )
-
-            # Default: Requisition Profile
-            res = req_tools.get_student_requisition_profile(std_id)
-            return (
-                f"### 📋 Student Requisition Profile\n"
-                f"- **Student ID:** {std_id}\n"
-                f"- **Active Bookings:** {len(res.get('active_bookings', []))}\n"
-                f"- **Equipment in Custody:** {len(res.get('equipment_held', []))}\n"
-                f"- **No-Show Strikes:** {res.get('no_show_penalties', 0)} / 3"
-            )
-
-        return f"Response from {subagent_name} for query: {query}"
+            await asyncio.wait_for(_stream(), timeout=60.0)
+        finally:
+            runtime.reset_context(token)
+        reply = "".join(chunks).strip()
+        if not reply:
+            raise RuntimeError("The assistant returned no answer.")
+        return reply
 
     # ═══════════════════════════════════════════════════════════════
     #  Multi-Agent Coordination & Response Synthesis
@@ -597,99 +403,73 @@ class CentralOrchestrator:
     #  Main Orchestrator Entry Point
     # ═══════════════════════════════════════════════════════════════
 
-    async def process_query(
-        self,
-        query: str,
-        session_id: Optional[str] = None,
-        user_id: str = "student_default",
-    ) -> Dict[str, Any]:
-        """Main end-to-end processing pipeline for user requests."""
+    async def process_query(self, query: str, session_id: Optional[str] = None, actor: Actor = None) -> Dict[str, Any]:
+        """End-to-end pipeline. `actor` is the authenticated user resolved by the API layer from the session cookie."""
+        if actor is None:
+            raise ServiceError("Authentication required.")
         if not query or not query.strip():
-            return {
-                "error": "Message cannot be empty",
-                "reply": "Please enter a valid question or command.",
-                "routed_to": [],
-                "intent": "invalid",
-            }
+            return {"error": "Message cannot be empty", "reply": "Please enter a valid question or command.", "routed_to": [], "intent": "invalid"}
 
-        session = session_manager.get_or_create_session(session_id, user_id=user_id)
+        session = session_manager.get_or_create_session(session_id, user_id=actor.user_id)
         session.add_message(role="user", content=query)
+        q_norm = query.strip().lower().rstrip(".!")
 
-        # 1. Classify and Route
+        # ── Explicit confirmation turns are handled deterministically (never by the LLM) ──
+        pending = await asyncio.to_thread(pending_actions.latest_pending, actor, session.session_id)
+        if pending and q_norm in CONFIRM_WORDS:
+            outcome = await asyncio.to_thread(pending_actions.confirm, actor, pending["action_id"])
+            reply = ("✅ " if outcome.get("ok") else "⚠️ ") + outcome["message"]
+            return self._finish(session, query, reply, ["central_orchestrator"], "action_confirmed" if outcome.get("ok") else "action_failed",
+                                "User confirmed a staged action", actor, executed=outcome)
+        if pending and q_norm in DECLINE_WORDS:
+            await asyncio.to_thread(pending_actions.cancel, actor, pending["action_id"])
+            return self._finish(session, query, "No problem - I cancelled that request. Nothing was changed.", ["central_orchestrator"],
+                                "action_cancelled", "User declined a staged action", actor)
+
         routing = await self.classify_and_route(query, session)
-        logger.info(
-            f"Routing decision: intent={routing.intent}, targets={routing.target_subagents}"
-        )
+        logger.info("Routing decision: intent=%s targets=%s", routing.intent, routing.target_subagents)
+        reply, routed_to = "", []
 
-        reply = ""
-        routed_to = []
-
-        # 2. Handle Intent Cases
         if routing.intent == "clarification_needed":
-            reply = routing.clarification_question or "Could you please clarify your request?"
-            routed_to = ["central_orchestrator"]
-
+            reply, routed_to = routing.clarification_question or "Could you please clarify your request?", ["central_orchestrator"]
         elif routing.intent == "out_of_scope":
-            reply = routing.out_of_scope_explanation or (
-                "This request is outside the scope of GIKI campus operations."
-            )
+            reply = routing.out_of_scope_explanation or "This request is outside the scope of GIKI campus operations."
             routed_to = ["central_orchestrator"]
-
-        elif routing.intent == "single_subagent" and routing.target_subagents:
-            target = routing.target_subagents[0]
-            sub_query = routing.subagent_queries.get(target, query)
-            routed_to = [target]
-            try:
-                reply = await self.invoke_subagent(target, sub_query, user_id=user_id)
-            except Exception as e:
-                logger.error(f"Error invoking {target}: {e}")
-                reply = (
-                    f"⚠️ An issue occurred while contacting the **{SUBAGENT_LABELS.get(target, target)}**.\n"
-                    f"Details: {str(e)}\n"
-                    f"Please try again or contact the campus administrator."
-                )
-
-        elif routing.intent == "multi_subagent" and routing.target_subagents:
-            routed_to = routing.target_subagents
-            tasks = []
-            for target in routed_to:
+        elif routing.target_subagents:
+            routed_to = list(routing.target_subagents)
+            results: Dict[str, str] = {}
+            for target in routed_to:  # sequential: at most one staged confirmation, deterministic ordering
                 sub_query = routing.subagent_queries.get(target, query)
-                tasks.append(self.invoke_subagent(target, sub_query, user_id=user_id))
-
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
-            subagent_results = {}
-            for target, resp in zip(routed_to, responses):
-                if isinstance(resp, Exception):
-                    subagent_results[target] = f"⚠️ Error: {str(resp)}"
-                else:
-                    subagent_results[target] = resp
-
-            reply = await self.synthesize_multi_agent_responses(query, subagent_results)
-
+                try:
+                    results[target] = await self.invoke_subagent(target, sub_query, session, actor)
+                except Exception as exc:
+                    logger.error("Error invoking %s: %s", target, exc)
+                    results[target] = (f"⚠️ The {SUBAGENT_LABELS.get(target, target)} could not complete this request right now ({type(exc).__name__}). "
+                                       "No changes were made. You can also do this directly from the portal pages.")
+            reply = next(iter(results.values())) if len(results) == 1 else await self.synthesize_multi_agent_responses(query, results)
         else:
-            # Fallback
-            reply = "I could not identify the appropriate subagent for this request. Please try rephrasing your question."
-            routed_to = ["central_orchestrator"]
+            reply, routed_to = "I could not identify which part of campus services this relates to. Could you rephrase?", ["central_orchestrator"]
 
-        # 3. Store Assistant Turn in Session
-        session.add_message(
-            role="assistant",
-            content=reply,
-            routed_to=routed_to,
-            intent=routing.intent,
-            metadata={"reasoning": routing.reasoning},
-        )
+        return self._finish(session, query, reply, routed_to, routing.intent, routing.reasoning, actor)
 
+    def _finish(self, session: Session, query: str, reply: str, routed_to: List[str], intent: str, reasoning: str, actor: Actor,
+                executed: Optional[dict] = None) -> Dict[str, Any]:
+        staged = pending_actions.pending_for_session(actor, session.session_id)
+        if staged:
+            lines = "\n".join(f"- {s['summary']}" for s in staged)
+            if "confirm" not in reply.lower():
+                reply += f"\n\n**Awaiting your confirmation:**\n{lines}\n\nReply **yes** to proceed or **no** to cancel."
+        session.add_message(role="assistant", content=reply, routed_to=routed_to, intent=intent, metadata={"reasoning": reasoning})
         return {
-            "session_id": session.session_id,
-            "user_id": session.user_id,
-            "query": query,
-            "reply": reply,
-            "routed_to": routed_to,
-            "routed_to_labels": [SUBAGENT_LABELS.get(r, r) for r in routed_to],
-            "intent": routing.intent,
-            "reasoning": routing.reasoning,
+            "session_id": session.session_id, "user_id": session.user_id, "query": query, "reply": reply, "routed_to": routed_to,
+            "routed_to_labels": [SUBAGENT_LABELS.get(r, r) for r in routed_to], "intent": intent, "reasoning": reasoning,
+            "pending_actions": [{"action_id": s["action_id"], "summary": s["summary"], "tool": s["tool"]} for s in staged],
+            "executed": executed,
         }
+
+
+CONFIRM_WORDS = {"yes", "y", "yep", "yeah", "confirm", "confirmed", "ok", "okay", "sure", "go ahead", "do it", "proceed", "please do", "yes please"}
+DECLINE_WORDS = {"no", "n", "nope", "cancel", "stop", "dont", "don't", "never mind", "nevermind", "no thanks", "abort"}
 
 
 # Global singleton instance
