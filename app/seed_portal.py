@@ -27,6 +27,8 @@ MEMBERS = [("ACM GIKI Chapter", "2024405", "member"), ("Netronix Networking Soci
 
 def seed() -> None:
     with db.tx() as cur:
+        cur.execute("INSERT INTO student_profiles (user_id) SELECT user_id FROM users WHERE role='student' ON CONFLICT DO NOTHING")
+        cur.execute("UPDATE venues SET exclusive=FALSE WHERE venue_id='SPORTS_GYM'")
         for code, name in INSTRUCTORS.items():
             cur.execute("UPDATE courses SET instructor=COALESCE(instructor,%s) WHERE course_code=%s", (name, code))
         for code, lab in LAB_SLOTS.items():
