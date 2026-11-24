@@ -1,165 +1,101 @@
-"""
-Course Management API Router
-Provides REST endpoints for course catalog, prerequisite DAG traversal,
-and enrollment eligibility checking.
-"""
-from fastapi import APIRouter, Depends, HTTPException, Path as PathParam
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from app.database import SessionLocal
-from pydantic import BaseModel
+"""Course Management API - thin HTTP layer over app.services.courses (the same service the AI assistant uses)."""
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 
+from app import db
+from app.api.deps import current_actor
+from app.services import courses
+from app.services.actor import Actor
 
 router = APIRouter()
 
 
-def get_db():
-    """FastAPI dependency that provides a database session per request."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+class StudentRef(BaseModel):
+    student_id: str | None = Field(default=None, max_length=10, description="Administrators only: act for this student")
 
 
-# ── Schemas ───────────────────────────────────────────────────
-
-class CourseOut(BaseModel):
-    course_code: str
-    title: str
-    credits: int
-
-    class Config:
-        from_attributes = True
+class WhatIfBody(BaseModel):
+    minors: list[str] | None = None
+    hypothetical_courses: list[str] | None = Field(default=None, max_length=20)
 
 
-class PrereqNode(BaseModel):
-    course_code: str
-    title: str
-    prerequisites: list["PrereqNode"] = []
+class AskBody(BaseModel):
+    question: str = Field(min_length=3, max_length=500)
 
 
-class DAGResponse(BaseModel):
-    course_code: str
-    title: str
-    prerequisite_chain: list[PrereqNode]
+class InterestBody(BaseModel):
+    interests: str = Field(max_length=300)
 
 
-class EnrollmentCheck(BaseModel):
-    completed_courses: list[str] = ["CS101", "CS102", "CS201", "CS232"]
+@router.get("")
+def list_courses(q: str | None = None, category: str | None = None, student_id: str | None = None, actor: Actor = Depends(current_actor)):
+    return courses.list_courses(actor, q, category, False, student_id)
 
 
-class EnrollmentResult(BaseModel):
-    course_code: str
-    course_title: str
-    can_enroll: bool
-    completed_prerequisites: list[str]
-    missing_prerequisites: list[str]
-    message: str
+@router.get("/me/registrations")
+def my_registrations(student_id: str | None = None, actor: Actor = Depends(current_actor)):
+    return courses.my_registrations(actor, student_id)
 
 
-# ── Endpoints ─────────────────────────────────────────────────
-
-@router.get("/", response_model=list[CourseOut])
-def list_courses(db: Session = Depends(get_db)):
-    rows = db.execute(text("SELECT course_code, title, credits FROM courses ORDER BY course_code")).fetchall()
-    return [{"course_code": r[0], "title": r[1], "credits": r[2]} for r in rows]
+@router.get("/me/timetable")
+def my_timetable(student_id: str | None = None, actor: Actor = Depends(current_actor)):
+    return courses.timetable(actor, student_id)
 
 
-@router.get("/{course_code}", response_model=CourseOut)
-def get_course(course_code: str, db: Session = Depends(get_db)):
-    row = db.execute(
-        text("SELECT course_code, title, credits FROM courses WHERE course_code = :code"),
-        {"code": course_code.upper()}
-    ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail=f"Course '{course_code}' not found in the catalog")
-    return {"course_code": row[0], "title": row[1], "credits": row[2]}
+@router.get("/me/record")
+def academic_record(student_id: str | None = None, actor: Actor = Depends(current_actor)):
+    return courses.academic_record(actor, student_id)
 
 
-@router.get("/{course_code}/prerequisites", response_model=DAGResponse)
-def get_prerequisite_chain(course_code: str, db: Session = Depends(get_db)):
-    course = db.execute(
-        text("SELECT course_code, title FROM courses WHERE course_code = :code"),
-        {"code": course_code.upper()}
-    ).fetchone()
-    if not course:
-        raise HTTPException(status_code=404, detail=f"Course '{course_code}' not found in the catalog")
-
-    def _build_chain(code: str, visited: set | None = None) -> list[dict]:
-        if visited is None:
-            visited = set()
-        if code in visited:
-            return []
-        visited.add(code)
-
-        prereqs = db.execute(
-            text("""
-                SELECT c.course_code, c.title
-                FROM course_prerequisites cp
-                JOIN courses c ON c.course_code = cp.prereq_code
-                WHERE cp.course_code = :code
-            """),
-            {"code": code}
-        ).fetchall()
-
-        return [
-            {
-                "course_code": p[0],
-                "title": p[1],
-                "prerequisites": _build_chain(p[0], visited),
-            }
-            for p in prereqs
-        ]
-
-    return {
-        "course_code": course[0],
-        "title": course[1],
-        "prerequisite_chain": _build_chain(course_code.upper()),
-    }
+@router.get("/me/recommendations")
+def recommendations(interests: str | None = Query(default=None, max_length=300), actor: Actor = Depends(current_actor)):
+    return courses.recommend_electives(actor, interests)
 
 
-@router.post("/{course_code}/can-enroll", response_model=EnrollmentResult)
-def check_enrollment(course_code: str, body: EnrollmentCheck, db: Session = Depends(get_db)):
-    course = db.execute(
-        text("SELECT course_code, title FROM courses WHERE course_code = :code"),
-        {"code": course_code.upper()}
-    ).fetchone()
-    if not course:
-        raise HTTPException(status_code=404, detail=f"Course '{course_code}' not found in the catalog")
+@router.put("/me/interests")
+def set_interests(body: InterestBody, actor: Actor = Depends(current_actor)):
+    actor.require_role("student")
+    with db.tx() as cur:
+        cur.execute("INSERT INTO student_profiles (user_id, interests) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET interests=EXCLUDED.interests",
+                    (actor.user_id, body.interests.strip()))
+    return {"ok": True, "interests": body.interests.strip()}
 
-    completed_upper = {c.upper().strip() for c in body.completed_courses}
 
-    # BFS to collect all required prerequisites
-    all_required: set[str] = set()
-    queue = [course_code.upper()]
-    visited: set[str] = set()
-    while queue:
-        current = queue.pop(0)
-        if current in visited:
-            continue
-        visited.add(current)
-        rows = db.execute(
-            text("SELECT prereq_code FROM course_prerequisites WHERE course_code = :code"),
-            {"code": current}
-        ).fetchall()
-        for (prereq,) in rows:
-            all_required.add(prereq)
-            queue.append(prereq)
+@router.post("/me/what-if")
+def what_if(body: WhatIfBody, actor: Actor = Depends(current_actor)):
+    return courses.what_if(actor, body.minors, body.hypothetical_courses)
 
-    met = sorted(all_required & completed_upper)
-    missing = sorted(all_required - completed_upper)
-    can_enroll = len(missing) == 0
 
-    return EnrollmentResult(
-        course_code=course[0],
-        course_title=course[1],
-        can_enroll=can_enroll,
-        completed_prerequisites=met,
-        missing_prerequisites=missing,
-        message=(
-            f"✅ You meet all prerequisites for {course[0]}! You are eligible to enroll."
-            if can_enroll
-            else f"❌ Cannot enroll in {course[0]}. Missing prerequisites: {', '.join(missing)}"
-        ),
-    )
+@router.get("/minors")
+def minors(actor: Actor = Depends(current_actor)):
+    return db.query("SELECT minor_name, required_courses, required_credits, description FROM degree_minors ORDER BY minor_name")
+
+
+@router.post("/ask")
+def ask_giki(body: AskBody, actor: Actor = Depends(current_actor)):
+    return courses.ask_giki(body.question)
+
+
+@router.get("/{code}")
+def get_course(code: str, student_id: str | None = None, actor: Actor = Depends(current_actor)):
+    return courses.get_course(actor, code, student_id)
+
+
+@router.get("/{code}/prerequisites")
+def prerequisites(code: str, actor: Actor = Depends(current_actor)):
+    return courses.prerequisite_chain(code)
+
+
+@router.get("/{code}/check")
+def check(code: str, student_id: str | None = None, actor: Actor = Depends(current_actor)):
+    return {"prerequisites": courses.check_prerequisites(actor, code, student_id), "schedule": courses.check_conflicts(actor, code, student_id)}
+
+
+@router.post("/{code}/register")
+def register(code: str, body: StudentRef | None = None, actor: Actor = Depends(current_actor)):
+    return courses.register(actor, code, body.student_id if body else None)
+
+
+@router.post("/{code}/drop")
+def drop(code: str, body: StudentRef | None = None, actor: Actor = Depends(current_actor)):
+    return courses.drop(actor, code, body.student_id if body else None)
