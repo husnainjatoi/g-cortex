@@ -12,8 +12,11 @@ export async function render(root) {
   }
   if (r.mess) {
     const days = {}; r.mess.attendance_14d.forEach(x => { days[x.day] = (days[x.day] || 0) + x.n; });
-    root.append(h('h2', null, 'Mess'), h('div', { class: 'grid g4' }, statCard('Rebates credited', money(r.mess.rebates.total_pkr), `${r.mess.rebates.rebates} transactions · ${r.mess.rebates.days} days`), statCard('Entries today', r.mess.entries_today), statCard('Mess-outs', r.mess.mess_out_by_status.map(s => `${s.status} ${s.n}`).join(' · ') || '—')));
-    root.append(h('div', { class: 'card' }, h('h3', null, 'Dining hall entries (last 14 days)'), barChart(Object.entries(days).map(([d, n]) => ({ label: fmtDate(d), value: n })), { label: 'label', value: 'value' })));
+    const bl = r.mess.billing;
+    root.append(h('h2', null, 'Mess billing & attendance'), h('div', { class: 'grid g4' }, statCard('Invoiced', money(bl.invoiced_pkr), `${bl.invoices} invoices`), statCard('Collected', money(bl.collected_pkr), `${bl.payments_awaiting_verification} receipts awaiting verification`),
+      statCard('Outstanding dues', money(bl.outstanding_pkr)), statCard('Security deposits held', money(bl.deposits_held_pkr), `Entries today: ${r.mess.entries_today}`)));
+    root.append(h('div', { class: 'grid g2' }, h('div', { class: 'card' }, h('h3', null, 'Invoiced vs collected by month'), table([{ label: 'Month', key: 'month' }, { label: 'Invoiced', render: m => money(m.invoiced) }, { label: 'Collected', render: m => money(m.collected) }, { label: 'Outstanding', render: m => money(m.outstanding) }], bl.by_month, { empty: 'No invoices yet.' })),
+      h('div', { class: 'card' }, h('h3', null, 'Dining hall entries (last 14 days)'), barChart(Object.entries(days).map(([d, n]) => ({ label: fmtDate(d), value: n })), { label: 'label', value: 'value' }))));
   }
   if (r.requisitions) {
     root.append(h('h2', null, 'Requisitions, sports & equipment'), h('div', { class: 'grid g3' },

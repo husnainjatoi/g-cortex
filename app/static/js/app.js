@@ -5,27 +5,24 @@ import { createChat } from './chat.js';
 const root = document.getElementById('app');
 const S = { user: null };
 
-const ICON = { dash: '▦', course: '🎓', mess: '🍽', req: '📋', sport: '🏸', equip: '🔧', bell: '🔔', bot: '✦', admin: '⚙', users: '👥', audit: '🛡', chart: '📊', check: '✔' };
+// Top-navigation model. A leaf is [href, label]; a group is [label, [[href, label], ...]]. Only items the user may use are listed
+// (the backend still enforces every permission - hiding is convenience, not security).
 function navFor(u) {
   if (u.role === 'student') return [
-    ['Overview', [['#/dashboard', 'Dashboard', ICON.dash]]],
-    ['Academics', [['#/courses', 'Courses & Timetable', ICON.course]]],
-    ['Campus Services', [['#/mess', 'Mess', ICON.mess], ['#/requisitions', 'Requisitions', ICON.req], ['#/sports', 'Sports Booking', ICON.sport], ['#/equipment', 'Lab Equipment', ICON.equip]]],
-    ['Assistant', [['#/assistant', 'G-Cortex Assistant', ICON.bot], ['#/notifications', 'Notifications & Activity', ICON.bell]]],
+    ['#/dashboard', 'Dashboard'], ['#/courses', 'Courses'], ['#/mess', 'Mess'], ['#/requisitions', 'Requisitions'],
+    ['Facilities', [['#/sports', 'Sports Booking'], ['#/equipment', 'Lab Equipment']]], ['#/assistant', 'AI Assistant'],
   ];
-  if (u.role === 'faculty') return [
-    ['Faculty', [['#/approvals', 'Approvals', ICON.check], ['#/mess-forecast', 'Mess Forecast', ICON.chart]]],
-    ['Assistant', [['#/assistant', 'G-Cortex Assistant', ICON.bot], ['#/notifications', 'Notifications & Activity', ICON.bell]]],
-  ];
+  if (u.role === 'faculty') return [['#/approvals', 'Approvals'], ['#/mess-forecast', 'Mess Forecast'], ['#/assistant', 'AI Assistant']];
   const has = (s) => u.scopes.includes('super') || u.scopes.includes(s);
-  const adm = [['#/admin', 'Overview & Reports', ICON.chart]];
-  if (has('academic')) adm.push(['#/admin/courses', 'Course Administration', ICON.course]);
-  if (has('mess')) adm.push(['#/admin/mess', 'Mess Office', ICON.mess]);
-  if (has('requisition')) adm.push(['#/admin/requisitions', 'Requisition Approvals', ICON.req], ['#/admin/sports', 'Sports & Venues', ICON.sport], ['#/admin/equipment', 'Equipment Inventory', ICON.equip]);
-  const sys = [];
-  if (has('super')) sys.push(['#/admin/users', 'Users & Roles', ICON.users], ['#/admin/settings', 'Rules & Settings', ICON.admin], ['#/admin/audit', 'Audit & Events', ICON.audit]);
-  sys.push(['#/notifications', 'Notifications & Activity', ICON.bell], ['#/assistant', 'G-Cortex Assistant', ICON.bot]);
-  return [['Administration', adm], ['System', sys]];
+  const items = [['#/admin', 'Admin Dashboard']];
+  if (has('academic')) items.push(['Academics', [['#/admin/courses', 'Course Management'], ['#/admin/knowledge', 'Official GIKI Data']]]);
+  if (has('super')) items.push(['#/admin/users', 'Student Management']);
+  if (has('mess')) items.push(['#/admin/mess', 'Mess Administration']);
+  if (has('requisition')) items.push(['#/admin/requisitions', 'Requisition Approvals'], ['Resources', [['#/admin/sports', 'Sports & Venues'], ['#/admin/equipment', 'Equipment Inventory']]]);
+  const reports = [['#/admin/reports', 'Reports & Analytics']];
+  if (has('super')) reports.push(['#/admin/settings', 'Rules & Settings'], ['#/admin/audit', 'Audit & Events']);
+  items.push(['Reports & System', reports]);
+  return items;
 }
 
 const routes = {
@@ -33,7 +30,7 @@ const routes = {
   '/requisitions': () => import('./pages/requisitions.js'), '/sports': () => import('./pages/sports.js'), '/equipment': () => import('./pages/equipment.js'),
   '/notifications': () => import('./pages/notifications.js'), '/assistant': () => import('./pages/assistant.js'), '/approvals': () => import('./pages/approvals.js'),
   '/mess-forecast': () => import('./pages/forecast.js'),
-  '/admin': () => import('./pages/admin_overview.js'), '/admin/courses': () => import('./pages/admin_courses.js'), '/admin/mess': () => import('./pages/admin_mess.js'),
+  '/admin': () => import('./pages/admin_dashboard.js'), '/admin/reports': () => import('./pages/admin_overview.js'), '/admin/knowledge': () => import('./pages/admin_knowledge.js'), '/profile': () => import('./pages/profile.js'), '/admin/courses': () => import('./pages/admin_courses.js'), '/admin/mess': () => import('./pages/admin_mess.js'),
   '/admin/requisitions': () => import('./pages/admin_requisitions.js'), '/admin/sports': () => import('./pages/admin_sports.js'),
   '/admin/equipment': () => import('./pages/admin_equipment.js'), '/admin/users': () => import('./pages/admin_users.js'),
   '/admin/settings': () => import('./pages/admin_settings.js'), '/admin/audit': () => import('./pages/admin_audit.js'),
@@ -48,8 +45,10 @@ async function route() {
   const path = (location.hash.replace(/^#/, '') || '').split('?')[0];
   if (!routes[path]) { location.hash = home(); return; }
   document.body.classList.toggle('on-assistant', path === '/assistant');
-  document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + path));
-  document.getElementById('sidebar')?.classList.remove('open');
+  document.body.classList.toggle('on-assistant', path === '/assistant');
+  markActive(path);
+  document.getElementById('topnav')?.classList.remove('open');
+  document.querySelectorAll('.dd.open').forEach(d => d.classList.remove('open'));
   clear(content).append(h('div', { class: 'muted' }, 'Loading…'));
   try {
     const mod = await routes[path]();
@@ -65,27 +64,46 @@ async function updateBell() {
   try { const r = await api.get('/api/auth/me'); S.user = { ...S.user, ...r }; if (bell) bell.textContent = r.unread_notifications ? `🔔 ${r.unread_notifications}` : '🔔'; } catch (_) { /* session expired handled on next call */ }
 }
 
+function markActive(path) {
+  document.querySelectorAll('.topnav a[data-href]').forEach(a => a.classList.toggle('active', a.dataset.href === '#' + path));
+  document.querySelectorAll('.topnav .dd').forEach(d => d.classList.toggle('active', !!d.querySelector('a.active')));
+}
+
+function navItem(item) {
+  if (typeof item[1] === 'string') return h('a', { href: item[0], 'data-href': item[0], class: 'navlink' }, item[1]);
+  const [label, kids] = item;
+  const dd = h('div', { class: 'dd' },
+    h('button', { class: 'navlink', 'aria-haspopup': 'true', onclick: (e) => { e.stopPropagation(); const open = dd.classList.contains('open'); document.querySelectorAll('.dd.open').forEach(d => d.classList.remove('open')); dd.classList.toggle('open', !open); } }, label, h('span', { class: 'caret' }, '▾')),
+    h('div', { class: 'dd-menu' }, kids.map(([href, text]) => h('a', { href, 'data-href': href }, text))));
+  return dd;
+}
+
 function layout() {
   clear(root);
-  const sidebar = h('aside', { class: 'sidebar', id: 'sidebar' },
-    h('div', { class: 'brand' }, h('img', { src: '/static/img/logo.png', alt: 'G-Cortex' }), h('div', null, 'G-Cortex', h('small', null, 'GIKI Campus Portal'))),
-    h('nav', { class: 'nav' }, navFor(S.user).map(([title, items]) => [h('h4', null, title), items.map(([href, label, ico]) => h('a', { href }, h('span', { class: 'ico' }, ico), label))])),
-    h('div', { class: 'side-foot' }, `${S.user.role === 'admin' ? 'Administrator' : S.user.role === 'faculty' ? 'Faculty' : 'Student'} · ${S.user.user_id}`));
-  bell = h('a', { href: '#/notifications', class: 'btn sm', title: 'Notifications' }, '🔔');
-  const topbar = h('div', { class: 'topbar' },
-    h('button', { class: 'btn sm menu-btn', onclick: () => sidebar.classList.toggle('open'), 'aria-label': 'Menu' }, '☰'),
-    h('div', { class: 'right row' }, bell,
-      h('div', { class: 'who' }, h('b', null, S.user.full_name), h('span', { class: 'small muted' }, S.user.role === 'admin' ? `Admin · ${S.user.scopes.join(', ')}` : S.user.role)),
-      h('button', { class: 'btn sm', onclick: async () => { await api.post('/api/auth/logout').catch(() => {}); S.user = null; sessionStorage.removeItem('gcortex_chat'); location.hash = ''; renderLogin(); } }, 'Sign out')));
-  content = h('div', { class: 'content' });
-  root.append(h('div', { class: 'shell' }, sidebar, h('div', { class: 'main' }, topbar, content)));
-  if (S.user.role !== 'admin' || true) {
-    const chat = createChat({ role: S.user.role, onChange: () => route() });
-    chatDrawer = chat.el;
-    const fab = h('button', { class: 'chat-fab', title: 'Ask G-Cortex', 'aria-label': 'Open assistant', onclick: () => { chatDrawer.classList.toggle('open'); chat.focus(); } }, '✦');
-    root.append(chatDrawer, fab);
-    window.__chatDrawer = chatDrawer;
-  }
+  const links = h('nav', { class: 'navlinks', 'aria-label': 'Main' }, navFor(S.user).map(navItem));
+  bell = h('a', { href: '#/notifications', class: 'iconbtn', title: 'Notifications', 'aria-label': 'Notifications' }, '🔔');
+  const initials = S.user.full_name.split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
+  const profile = h('div', { class: 'dd profile' },
+    h('button', { class: 'avatar', 'aria-haspopup': 'true', 'aria-label': 'Account menu', onclick: (e) => { e.stopPropagation(); const open = profile.classList.contains('open'); document.querySelectorAll('.dd.open').forEach(d => d.classList.remove('open')); profile.classList.toggle('open', !open); } }, initials),
+    h('div', { class: 'dd-menu right' },
+      h('div', { class: 'who' }, h('b', null, S.user.full_name), h('span', { class: 'small muted' }, S.user.role === 'admin' ? `Administrator · ${S.user.scopes.join(', ')}` : `${S.user.role} · ${S.user.user_id}`)),
+      h('a', { href: '#/profile', 'data-href': '#/profile' }, 'Profile & password'), h('a', { href: '#/notifications', 'data-href': '#/notifications' }, 'Notifications & activity'),
+      h('button', { class: 'linkbtn', onclick: async () => { await api.post('/api/auth/logout').catch(() => {}); S.user = null; sessionStorage.removeItem('gcortex_chat'); location.hash = ''; renderLogin(); } }, 'Sign out')));
+  const bar = h('header', { class: 'topnav', id: 'topnav' },
+    h('div', { class: 'topnav-inner' },
+      h('a', { class: 'brand', href: '#', onclick: (e) => { e.preventDefault(); location.hash = home(); } }, h('img', { src: '/static/img/logo.png', alt: 'G-Cortex' }), h('span', null, 'G-Cortex', h('small', null, 'GIKI Campus Portal'))),
+      links,
+      h('div', { class: 'topnav-right' },
+        h('button', { class: 'btn sm assistant-btn', onclick: () => { if (location.hash === '#/assistant') return; window.__chatDrawer.classList.toggle('open'); window.__chat.focus(); }, title: 'Ask G-Cortex' }, '✦', h('span', { class: 'lbl' }, ' Ask')),
+        bell, profile,
+        h('button', { class: 'menu-btn iconbtn', 'aria-label': 'Menu', 'aria-expanded': 'false', onclick: (e) => { const o = bar.classList.toggle('open'); e.currentTarget.setAttribute('aria-expanded', o); } }, '☰'))));
+  content = h('main', { class: 'content' });
+  root.append(bar, content);
+  document.addEventListener('click', () => document.querySelectorAll('.dd.open').forEach(d => d.classList.remove('open')));
+  const chat = createChat({ role: S.user.role, onChange: () => route() });
+  chatDrawer = chat.el; window.__chat = chat; window.__chatDrawer = chatDrawer;
+  const fab = h('button', { class: 'chat-fab', title: 'Ask G-Cortex', 'aria-label': 'Open assistant', onclick: () => { chatDrawer.classList.toggle('open'); chat.focus(); } }, '✦');
+  root.append(chatDrawer, fab);
 }
 
 function renderLogin() {
@@ -105,7 +123,7 @@ function renderLogin() {
   root.append(h('div', { class: 'login-wrap' },
     h('section', { class: 'login-hero' }, h('img', { src: '/static/img/logo.png', alt: 'G-Cortex logo' }), h('h1', null, 'G-Cortex'),
       h('p', null, 'The campus operating system for GIKI — academics, dining and campus resources in one place, with an assistant that can do the work for you.'),
-      h('ul', null, h('li', null, 'Register for courses with live prerequisite and timetable checks'), h('li', null, 'Mess-out requests, rebates and your dynamic dining QR'),
+      h('ul', null, h('li', null, 'Register for courses with live prerequisite and timetable checks'), h('li', null, 'Monthly mess bills, your security deposit and a dynamic dining QR'),
         h('li', null, 'Sports bookings, venue requisitions and lab equipment custody'))),
     h('section', { class: 'login-card' }, f)));
 }

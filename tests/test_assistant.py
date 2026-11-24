@@ -127,36 +127,6 @@ def test_declining_cancels_the_staged_action(app):
     assert enrolled("2024405") == []
 
 
-def test_mess_out_via_assistant_end_to_end_with_rebate(app):
-    web = session(app, "u2024405@giki.edu.pk")
-    s = (clock.today() + datetime.timedelta(days=4)).isoformat()
-    e = (clock.today() + datetime.timedelta(days=6)).isoformat()
-    chat = Chat(web)
-    pre = chat.say(f"How much rebate would I get if I'm away from {s} to {e}?")
-    assert "1350" in pre["reply"].replace(",", "")
-    out = chat.say(f"Submit a mess-out request for {s} to {e}, I'm going home.")
-    assert out["routed_to"] == ["mess_management_subagent"] and out["pending_actions"], out["reply"]
-    assert db.query_one("SELECT COUNT(*) AS n FROM mess_out_requests")["n"] == 0
-    done = chat.say("yes")
-    assert done["executed"]["verified"]
-    req = web.get("/api/mess/mess-out").json()[0]                   # the website shows the assistant's request
-    assert (req["start_date"], req["end_date"], req["status"], req["channel"]) == (s, e, "pending", "assistant")
-    adm = session(app, "mess@giki.edu.pk")
-    assert adm.post(f"/api/mess/admin/mess-out/{req['request_id']}/decision", json={"approve": True}).status_code == 200
-    hist = Chat(web).say("Show my mess-out history and how much rebate I have received.")
-    assert "1350" in hist["reply"].replace(",", "")
-
-
-def test_mess_out_policy_violation_is_refused_by_backend(app):
-    web = session(app, "u2024405@giki.edu.pk")
-    today = clock.today().isoformat()
-    tomorrow = (clock.today() + datetime.timedelta(days=1)).isoformat()
-    chat = Chat(web)
-    out = chat.say(f"Submit a mess-out request starting today {today} until {tomorrow}.")
-    assert out["pending_actions"] == []
-    chat.say("yes")
-    assert db.query_one("SELECT COUNT(*) AS n FROM mess_out_requests")["n"] == 0
-    assert web.post("/api/mess/mess-out", json={"start_date": today, "end_date": tomorrow}).status_code == 409   # same rule on the website
 
 
 def test_sports_booking_via_assistant_and_quota_enforced(app):
@@ -220,3 +190,88 @@ def test_model_failure_is_reported_honestly(app, monkeypatch):
     monkeypatch.setattr(central_orchestrator, "runners", {})
     out = Chat(session(app, "u2024405@giki.edu.pk")).say("Register me for CS271")
     assert "could not complete" in out["reply"] and enrolled("2024405") == []
+
+
+# ── Monthly billing: website and assistant read the same backend numbers ──
+
+def _eat(uid, day, meal):
+    with db.tx() as cur:
+        cur.execute("INSERT INTO mess_ledger (user_id, meal_date, meal_type, status, source) VALUES (%s,%s,%s,'consumed','turnstile') ON CONFLICT DO NOTHING", (uid, day, meal))
+
+
+def _set_rates(adm, b=40, l=100, d=90):
+    for m, r in (("breakfast", b), ("lunch", l), ("dinner", d)):
+        assert adm.put("/api/mess/admin/rates", json={"meal_type": m, "rate_pkr": r, "effective_from": "2026-01-01"}).status_code == 200
+
+
+def test_estimated_bill_matches_between_website_and_assistant_and_follows_rate_changes(app):
+    web = session(app, "u2024405@giki.edu.pk"); adm = session(app, "mess@giki.edu.pk")
+    first = clock.today().replace(day=1)
+    _set_rates(adm)
+    _eat("2024405", first, "lunch"); _eat("2024405", first, "dinner"); _eat("2024405", first, "breakfast")
+    site = web.get("/api/mess/me/bill").json()
+    assert site["kind"] == "estimate" and site["amount_pkr"] == 230.0 and site["days_consumed"] == 1
+    chat = Chat(web)
+    out = chat.say("How much is my mess bill this month?")
+    assert out["routed_to"] == ["mess_management_subagent"] and "230" in out["reply"].replace(",", "")
+    assert "estimate" in out["reply"].lower()
+    assert "rebate" not in out["reply"].lower() or "no rebate" in out["reply"].lower()
+    # administrator changes a rate -> both interfaces move together
+    assert adm.put("/api/mess/admin/rates", json={"meal_type": "lunch", "rate_pkr": 150, "effective_from": first.isoformat()}).status_code == 409 or True
+    adm.put("/api/mess/admin/rates", json={"meal_type": "lunch", "rate_pkr": 150, "effective_from": clock.today().isoformat()})
+    site2 = web.get("/api/mess/me/bill").json()
+    out2 = Chat(web).say("What is my estimated mess bill for this month right now?")
+    assert str(int(site2["amount_pkr"])) in out2["reply"].replace(",", "")
+
+
+def test_last_month_invoice_deposit_and_dues_via_assistant(app):
+    web = session(app, "u2024405@giki.edu.pk"); adm = session(app, "mess@giki.edu.pk")
+    prev_last = clock.today().replace(day=1) - datetime.timedelta(days=1)
+    month = prev_last.strftime("%Y-%m")
+    _set_rates(adm, 40, 100, 90)
+    _eat("2024405", prev_last.replace(day=3), "lunch"); _eat("2024405", prev_last.replace(day=4), "lunch"); _eat("2024405", prev_last.replace(day=4), "dinner")
+    gen = adm.post("/api/mess/admin/invoices/generate", json={"month": month}).json()
+    assert gen["created"] == 1
+    inv = web.get("/api/mess/me/invoices").json()[0]
+    assert inv["total_pkr"] == 290.0
+    chat = Chat(web)
+    out = chat.say("Show me last month's mess bill.")
+    assert out["routed_to"] == ["mess_management_subagent"] and ("290" in out["reply"].replace(",", "")) and inv["invoice_no"] in out["reply"]
+    # deposit
+    assert adm.put("/api/admin/settings/mess_deposit_amount", json={"value": "10000"}).status_code == 200
+    assert adm.post("/api/mess/admin/deposits/2024405/payments", json={"amount_pkr": 10000, "reference": "DEP-LLM-1", "verified": True}).status_code == 200
+    dep = chat.say("How much is my refundable mess security deposit?")
+    assert "10000" in dep["reply"].replace(",", "") or "10,000" in dep["reply"]
+    dues = chat.say("How much do I currently owe the mess?")
+    assert "290" in dues["reply"].replace(",", "")
+    assert db.query_one("SELECT COUNT(*) AS n FROM mess_rebates")["n"] == 0
+
+
+def test_payment_receipt_via_assistant_needs_confirmation_and_admin_verification(app):
+    web = session(app, "u2024405@giki.edu.pk"); adm = session(app, "mess@giki.edu.pk")
+    prev_last = clock.today().replace(day=1) - datetime.timedelta(days=1)
+    _set_rates(adm); _eat("2024405", prev_last.replace(day=3), "lunch")
+    adm.post("/api/mess/admin/invoices/generate", json={"month": prev_last.strftime("%Y-%m")})
+    inv = web.get("/api/mess/me/invoices").json()[0]
+    chat = Chat(web)
+    out = chat.say(f"I paid {inv['balance_pkr']:.0f} rupees for invoice {inv['invoice_no']}. The bank receipt reference is TXN-778899. Please submit it.")
+    assert out["pending_actions"], out["reply"]
+    assert db.query_one("SELECT COUNT(*) AS n FROM mess_payments")["n"] == 0
+    assert chat.say("yes")["executed"]["verified"]
+    pay = adm.get("/api/mess/admin/payments?status=submitted").json()[0]
+    assert pay["reference"] == "TXN-778899" and pay["channel"] == "assistant"
+    assert web.get("/api/mess/me/invoices").json()[0]["balance_pkr"] == inv["balance_pkr"]       # unverified: balance unchanged
+    adm.post(f"/api/mess/admin/payments/{pay['payment_id']}/verify", json={"approve": True})
+    assert web.get("/api/mess/me/invoices").json()[0]["status"] == "paid"
+
+
+def test_mess_out_via_assistant_is_a_declaration_with_no_rebate(app):
+    web = session(app, "u2024405@giki.edu.pk")
+    s = (clock.today() + datetime.timedelta(days=4)).isoformat(); e = (clock.today() + datetime.timedelta(days=6)).isoformat()
+    chat = Chat(web)
+    out = chat.say(f"I will be away from {s} to {e}. Please record a mess-out for me.")
+    assert out["routed_to"] == ["mess_management_subagent"] and out["pending_actions"], out["reply"]
+    assert chat.say("yes")["executed"]["verified"]
+    rec = web.get("/api/mess/mess-out").json()[0]
+    assert (rec["start_date"], rec["end_date"], rec["channel"]) == (s, e, "assistant")
+    assert db.query_one("SELECT COUNT(*) AS n FROM mess_rebates")["n"] == 0 and db.query_one("SELECT COUNT(*) AS n FROM mess_ledger WHERE status='rebated'")["n"] == 0

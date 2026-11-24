@@ -21,14 +21,15 @@ async function catalog(ctx) {
   const wrap = h('div'); const out = h('div');
   const q = h('input', { type: 'search', placeholder: 'Search code, title or topic…' });
   const cat = select([['', 'All categories'], 'core', 'elective', 'math', 'humanities'], '');
+  const scope = select([['true', 'Offered this term'], ['false', 'Full official GIKI catalogue']], 'true');
   async function load() {
-    const rows = await api.get('/api/courses' + qs({ q: q.value, category: cat.value }));
+    const rows = await api.get('/api/courses' + qs({ q: q.value, category: cat.value, offered_only: scope.value }));
     clear(out).append(table([
       { label: 'Code', render: r => h('b', null, r.course_code) }, { label: 'Title', key: 'title' }, { label: 'Cr', key: 'credits' },
       { label: 'Timetable', render: r => h('span', null, r.slot || '—', r.lab_slot ? h('div', { class: 'small muted' }, `Lab: ${r.lab_slot}`) : null) },
       { label: 'Prerequisites', render: r => (r.prerequisites.length ? r.prerequisites.join(', ') : 'None') },
       { label: 'Seats', render: r => `${r.seats_left}/${r.capacity}` },
-      { label: 'Status', render: r => badge(r.student_status === 'blocked_prerequisites' ? 'blocked_prerequisites' : r.student_status) },
+      { label: 'Status', render: r => r.student_status === 'not_offered' ? badge('catalogue only', 'mute') : badge(r.student_status) },
       { label: '', class: 'nowrap', render: r => h('span', { class: 'row' },
         h('button', { class: 'btn sm', onclick: () => details(r.course_code) }, 'Details'),
         r.student_status === 'available' ? h('button', { class: 'btn sm primary', onclick: () => register(r) }, 'Register') : null) },
@@ -52,10 +53,12 @@ async function catalog(ctx) {
       h('div', { class: 'grid g2' }, h('div', null, h('b', null, 'Credit hours: '), c.credits), h('div', null, h('b', null, 'Instructor: '), c.instructor || '—'),
         h('div', null, h('b', null, 'Lecture: '), c.slot || '—'), h('div', null, h('b', null, 'Lab: '), c.lab_slot || '—'), h('div', null, h('b', null, 'Seats left: '), `${c.seats_left} of ${c.capacity}`), h('div', null, h('b', null, 'Category: '), c.category)),
       h('h3', { style: 'margin-top:14px' }, 'Prerequisite chain'), c.prerequisite_chain.length ? chain(c.prerequisite_chain) : h('p', { class: 'muted' }, 'No prerequisites.'),
-      c.student_status === 'blocked_prerequisites' ? h('div', { class: 'alert warn' }, `You are missing: ${c.missing_prerequisites.join(', ')}`) : null) });
+      c.student_status === 'blocked_prerequisites' ? h('div', { class: 'alert warn' }, `You are missing: ${c.missing_prerequisites.join(', ')}`) : null,
+      c.catalog_only ? h('div', { class: 'alert info' }, 'This course is in the official GIKI catalogue but is not scheduled this term, so it cannot be registered yet.') : null,
+      c.official_source ? h('p', { class: 'small muted' }, 'Official source: ', h('a', { href: c.official_source.source_url, target: '_blank', rel: 'noopener' }, c.official_source.source_title || 'giki.edu.pk'), c.official_source.source_page ? `, p. ${c.official_source.source_page}` : '', ` · retrieved ${fmtDate(c.official_source.retrieved_at)}`, c.official_source.prereq_status === 'ambiguous' ? ` · official prerequisite text: “${c.official_source.official_prereq_text}”` : '') : null) });
   }
-  q.addEventListener('input', () => { clearTimeout(q._t); q._t = setTimeout(load, 250); }); cat.addEventListener('change', load);
-  wrap.append(h('div', { class: 'row', style: 'margin-bottom:12px' }, h('div', { style: 'flex:1;min-width:220px' }, q), h('div', null, cat)), out);
+  q.addEventListener('input', () => { clearTimeout(q._t); q._t = setTimeout(load, 250); }); cat.addEventListener('change', load); scope.addEventListener('change', load);
+  wrap.append(h('div', { class: 'row', style: 'margin-bottom:12px' }, h('div', { style: 'flex:1;min-width:220px' }, q), h('div', null, cat), h('div', null, scope)), out);
   await load(); return wrap;
 }
 
@@ -129,15 +132,18 @@ async function planner() {
 }
 
 async function ask() {
-  const out = h('div'); const q = h('input', { placeholder: 'e.g. What happens if my CGPA falls below 2.0?', maxlength: 500 });
+  const out = h('div'); const q = h('input', { placeholder: 'e.g. What is the add/drop policy? What is the minimum CGPA to graduate?', maxlength: 500 });
   const go = async () => {
     try {
       const r = await api.post('/api/courses/ask', { question: q.value });
-      clear(out).append(r.found ? r.passages.map(p => h('div', { class: 'card flat' }, h('b', null, p.title), h('div', { class: 'small muted' }, `Policy: ${p.topic} · relevance ${p.relevance}`), h('p', null, p.text))) : h('div', { class: 'alert warn' }, r.answer));
+      clear(out).append(r.found ? [h('div', { class: 'alert ok' }, 'Answers below come from official GIKI documents (giki.edu.pk). Check the cited source for the authoritative text.'),
+        r.passages.map(p => h('div', { class: 'card flat' }, h('div', { class: 'row spread' }, h('b', null, p.source_title || 'GIKI document'), badge(p.similarity ? `match ${Math.round(p.similarity * 100)}%` : 'text match', 'info')),
+          h('div', { class: 'small muted' }, [p.section ? `Section: ${p.section}` : null, p.page ? `p. ${p.page}` : null, p.retrieved_at ? `retrieved ${p.retrieved_at}` : null].filter(Boolean).join(' · ')), h('p', { style: 'white-space:pre-wrap' }, p.text),
+          h('a', { href: p.source_url, target: '_blank', rel: 'noopener' }, p.source_url)))] : h('div', { class: 'alert warn' }, r.answer));
     } catch (e) { clear(out).append(errorBox(e)); }
   };
   q.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
-  return h('div', { class: 'card' }, h('h2', null, 'Ask GIKI'), h('p', { class: 'muted' }, 'Answers are retrieved from the official policy corpus stored in the database.'), h('div', { class: 'row' }, h('div', { style: 'flex:1' }, q), h('button', { class: 'btn primary', onclick: go }, 'Ask')), h('div', { style: 'margin-top:12px' }, out));
+  return h('div', { class: 'card' }, h('h2', null, 'Ask GIKI'), h('p', { class: 'muted' }, 'Searches only official GIKI documents (Student Handbook, prospectus, calendar and other pages on giki.edu.pk). If the answer is not in them, it says so instead of guessing.'), h('div', { class: 'row' }, h('div', { style: 'flex:1' }, q), h('button', { class: 'btn primary', onclick: go }, 'Ask')), h('div', { style: 'margin-top:12px' }, out));
 }
 
 async function record() {
