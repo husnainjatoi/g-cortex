@@ -1,15 +1,15 @@
 import { api, qs } from '../api.js';
-import { h, clear, table, badge, tabs, modal, confirmDialog, toast, field, select, form, pageHead, fmtDate, fmtDateTime, money, addDays, errorBox } from '../ui.js';
+import { h, put, clear, table, badge, tabs, modal, confirmDialog, toast, field, select, form, pageHead, fmtDate, fmtDateTime, money, addDays, errorBox } from '../ui.js';
 
 export async function render(root, ctx) {
-  root.append(pageHead('Mess', 'Your monthly bill, security deposit, dining QR, meals and menu. You pay only for meals you actually eat.'));
+  root.append(pageHead('Mess', 'Your estimated and finalized monthly bills, payments, meal attendance and refundable security deposit.'));
   const holder = h('div'); root.append(holder);
   tabs(holder, [
     { key: 'bill', label: 'My bill', render: () => bill(ctx) },
     { key: 'inv', label: 'Invoices & payments', render: () => invoices(ctx) },
     { key: 'dep', label: 'Security deposit', render: () => deposit(ctx) },
     { key: 'qr', label: 'Dining QR', render: qr },
-    { key: 'meals', label: 'Meal records', render: meals },
+    { key: 'meals', label: 'Meal attendance', render: meals },
     { key: 'menu', label: 'Menu, macros & allergens', render: menu },
     { key: 'out', label: 'Mess-out', render: () => messOut(ctx) },
   ]);
@@ -19,18 +19,30 @@ const statusKind = { unpaid: 'warn', partial: 'info', paid: 'ok' };
 
 async function bill(ctx) {
   const b = await api.get('/api/mess/me/bill');
-  const wrap = h('div');
-  wrap.append(h('div', { class: `alert ${b.kind === 'estimate' ? 'info' : 'ok'}` }, h('b', null, b.kind === 'estimate' ? `ESTIMATE for ${b.month} — not an invoice. ` : `FINALIZED invoice for ${b.month}. `), b.explanation));
-  wrap.append(h('div', { class: 'grid g4' },
-    h('div', { class: 'card stat' }, h('div', { class: 'l' }, b.kind === 'estimate' ? 'Estimated bill' : 'Invoice total'), h('div', { class: 'v' }, b.amount_pkr == null ? '—' : money(b.amount_pkr)), h('div', { class: 's' }, b.rates_configured ? `Billing mode: ${b.billing_mode.replace('_', ' ')}` : 'Rates not configured yet')),
-    h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Days you ate'), h('div', { class: 'v' }, b.days_consumed), h('div', { class: 's' }, `${b.meals.breakfast} breakfast · ${b.meals.lunch} lunch · ${b.meals.dinner} dinner`)),
-    h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Previous month'), h('div', { class: 'v' }, b.previous_invoice ? money(b.previous_invoice.total_pkr) : '—'), h('div', { class: 's' }, b.previous_invoice ? `${b.previous_invoice.billing_month_label} · ${b.previous_invoice.status}` : 'No invoice')),
-    h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Outstanding (all invoices)'), h('div', { class: 'v' }, money(b.outstanding_total_pkr)), h('div', { class: 's' }, b.outstanding_total_pkr > 0 ? h('a', { href: '#/mess', onclick: () => document.querySelectorAll('.tabs button')[1].click() }, 'Pay / submit receipt') : 'Nothing due'))));
-  wrap.append(h('div', { class: 'card' }, h('h2', null, 'How this is calculated'),
-    table([{ label: 'Item', key: 'label' }, { label: 'Count', key: 'count' }, { label: 'Rate (PKR)', render: l => l.rate_pkr == null ? 'not configured' : l.rate_pkr }, { label: 'Amount', render: l => l.amount_pkr == null ? '—' : money(l.amount_pkr) }], b.lines, { empty: 'No meals recorded this month yet.' }),
-    h('p', { class: 'small muted' }, 'Only verified turnstile entries are counted; duplicate scans and invalid codes are never billed. Charges are set by the Mess Office. Nothing is charged in advance and the security deposit is not used for monthly bills.')));
+  const wrap = h('div'); const body = h('div');
+  const fin = b.kind === 'finalized';
+  const draw = (b) => {
+    const fin = b.kind === 'finalized';
+    put(body,
+      fin ? h('div', { class: 'alert ok' }, h('b', null, `FINALIZED invoice for ${b.month}. `), b.explanation)
+          : [h('div', { class: 'alert info', id: 'estimate-disclaimer' }, h('b', null, `ESTIMATE for ${b.month} — not an invoice, nothing is payable. `), b.disclaimer), b.amount_pkr == null ? h('div', { class: 'alert warn' }, b.explanation) : null],
+      h('div', { class: 'grid g4' },
+        h('div', { class: 'card stat' }, h('div', { class: 'l' }, fin ? 'Invoice total' : 'Estimated bill per student'), h('div', { class: 'v', id: 'bill-amount' }, b.amount_pkr == null ? 'Not available yet' : money(b.amount_pkr)),
+          h('div', { class: 's' }, fin ? `${b.invoice.status} · balance ${money(b.invoice.balance_pkr)}` : 'estimate only')),
+        h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Total food expenditure'), h('div', { class: 'v' }, b.expense_entries ? money(b.total_food_expenditure_pkr) : '—'), h('div', { class: 's' }, b.expense_entries ? `recorded ${fmtDate(b.expenditure_updated_at)}` : 'not recorded by the Mess Office yet')),
+        h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Students using the mess'), h('div', { class: 'v' }, b.students_using_mess), h('div', { class: 's' }, 'distinct students with verified entries')),
+        h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Your meals this month'), h('div', { class: 'v' }, b.days_consumed), h('div', { class: 's' }, `day(s) · ${b.meals.breakfast} breakfast · ${b.meals.lunch} lunch · ${b.meals.dinner} dinner`))),
+      h('div', { class: 'card' }, h('h2', null, 'How this is calculated'),
+        h('p', null, h('b', null, 'Estimated bill per student = total food expenditure ÷ number of distinct verified students using the mess.')),
+        b.expense_entries && b.students_using_mess ? h('p', null, `${money(b.total_food_expenditure_pkr)} ÷ ${b.students_using_mess} students = ${money(b.estimated_per_student_pkr)}${b.days_consumed ? '' : ' (you have no verified meals this month, so your estimate is PKR 0)'}`) : h('p', { class: 'muted' }, 'The calculation appears once the Mess Office has recorded the month\'s food expenditure and at least one student has a verified meal entry.'),
+        h('p', { class: 'small muted' }, 'Only verified entries are counted. This figure is calculated by the server; the portal does not compute bills itself.'), b.expenditure_updated_at ? h('p', { class: 'small muted' }, `Expenditure last updated ${fmtDateTime(b.expenditure_updated_at)}.`) : null,
+        h('p', { class: 'small' }, h('b', null, 'Your PKR 15,000 security deposit is separate: '), 'it is refundable, is not a prepaid balance and is never used to pay monthly bills automatically.')),
+      b.previous_invoice ? h('div', { class: 'card flat' }, h('b', null, 'Previous invoice: '), `${b.previous_invoice.billing_month_label} · ${money(b.previous_invoice.total_pkr)} · ${b.previous_invoice.status} · balance ${money(b.previous_invoice.balance_pkr)}`) : null,
+      h('div', { class: 'card flat' }, h('b', null, 'Outstanding on all finalized invoices: '), money(b.outstanding_total_pkr), ' ', b.outstanding_total_pkr > 0 ? h('a', { href: '#/mess', onclick: (e) => { e.preventDefault(); document.querySelectorAll('.tabs button')[1].click(); } }, 'Pay / submit receipt') : null));
+  };
+  draw(b);
   const month = h('input', { type: 'month', value: b.month });
-  wrap.append(h('div', { class: 'row' }, h('div', { style: 'width:190px' }, month), h('button', { class: 'btn', onclick: async () => { const m = await api.get('/api/mess/me/bill?month=' + month.value); modal({ title: `${m.month} — ${m.kind}`, body: h('div', null, h('p', null, m.explanation), h('p', null, h('b', null, 'Amount: '), m.amount_pkr == null ? '—' : money(m.amount_pkr)))}); } }, 'View another month')));
+  wrap.append(h('div', { class: 'row', style: 'margin-bottom:12px' }, h('div', { style: 'width:190px' }, month), h('button', { class: 'btn', onclick: async () => { try { draw(await api.get('/api/mess/me/bill?month=' + month.value)); } catch (e) { toast(e.message, 'bad'); } } }, 'Show this month')), body);
   return wrap;
 }
 
@@ -44,8 +56,10 @@ function challanView(c) {
 async function invoices(ctx) {
   const rows = await api.get('/api/mess/me/invoices'); const pays = await api.get('/api/mess/me/payments');
   const wrap = h('div');
+  const due = rows.reduce((a, i) => a + Number(i.balance_pkr), 0), pend = rows.reduce((a, i) => a + Number(i.pending_pkr || 0), 0);
+  wrap.append(h('div', { class: 'grid g3' }, h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Outstanding'), h('div', { class: 'v' }, money(due))), h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Pending verification'), h('div', { class: 'v' }, money(pend)), h('div', { class: 's' }, 'receipts awaiting the Mess Office')), h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Paid invoices'), h('div', { class: 'v' }, rows.filter(i => i.status === 'paid').length))));
   wrap.append(h('div', { class: 'card' }, h('h2', null, 'Monthly invoices'), table([
-    { label: 'Invoice', render: i => h('b', null, i.invoice_no) }, { label: 'Month', key: 'billing_month_label' }, { label: 'Days', key: 'days_count' }, { label: 'Total', render: i => money(i.total_pkr) },
+    { label: 'Invoice', render: i => h('b', null, i.invoice_no) }, { label: 'Month', key: 'billing_month_label' }, { label: 'Generated', render: i => fmtDate(i.generated_at) }, { label: 'Days', key: 'days_count' }, { label: 'Amount', render: i => money(i.total_pkr) },
     { label: 'Paid', render: i => money(i.paid_pkr) }, { label: 'Balance', render: i => money(i.balance_pkr) }, { label: 'Due', render: i => h('span', null, fmtDate(i.due_date), ' ', i.overdue ? badge('overdue') : null) },
     { label: 'Status', render: i => badge(i.status, statusKind[i.status]) },
     { label: '', render: i => h('span', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => detail(i) }, 'Details'),
