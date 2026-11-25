@@ -16,7 +16,7 @@ _HEADER_END = re.compile(r"\(\s*(\d)\s+(\d)\s+(\d)\s*\)\s*:")
 _PAGE = re.compile(r"<<PAGE (\d+)>>")
 _FACULTY = re.compile(r"^(Faculty of [A-Za-z&,() ]+?|Department of [A-Za-z&,() ]+?|School of [A-Za-z&,() ]+?)\s*$")
 _PREREQ = re.compile(r"Prerequisite\(s\)\s*:\s*(.*?)(?=\n\s*(?:Core for|Co-?requisite|Cross|$)|\Z)", re.S | re.I)
-_CODE_RE = re.compile(r"\b([A-Z]{2,4})\s?(\d{3})\b")
+_CODE_RE = re.compile(r"\b([A-Z]{2,4})\s?(\d{3}L?)\b")
 
 
 def norm_code(c: str) -> str:
@@ -32,7 +32,7 @@ def parse_prereq(text: str | None) -> dict:
     codes = [norm_code(a + b) for a, b in _CODE_RE.findall(raw)]
     leftover = _CODE_RE.sub("", raw)
     leftover = re.sub(r"\b(and|&)\b|[,;/()]", " ", leftover, flags=re.I).strip()
-    if codes and not leftover and not re.search(r"\bor\b", raw, re.I):
+    if codes and not leftover and not re.search(r"\bor\b", raw, re.I) and not re.search(rf"{CODE}\s*/\s*{CODE}", raw):
         return {"codes": sorted(set(codes)), "status": "parsed", "raw": raw}
     return {"codes": sorted(set(codes)), "status": "ambiguous", "raw": raw}
 

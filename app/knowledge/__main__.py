@@ -12,11 +12,18 @@ r = sub.add_parser("refresh")
 r.add_argument("--force", action="store_true", help="re-process documents even if unchanged")
 r.add_argument("--no-courses", action="store_true", help="skip the course-catalogue import")
 r.add_argument("--url", action="append", help="refresh only these giki.edu.pk URLs")
+sub.add_parser("import-curriculum", help="import the semester-wise degree plans, tracks and official minor from the stored Undergraduate Prospectus 2025")
+sub.add_parser("embed", help="back-fill missing embeddings (resumable; respects API quota)")
 sub.add_parser("status")
 sub.add_parser("verify", help="re-check every imported course against the stored official source page it cites")
 a = ap.parse_args()
 if a.cmd == "refresh":
     print(json.dumps(knowledge.refresh(None, a.url, a.force, not a.no_courses), indent=2, default=str))
+elif a.cmd == "import-curriculum":
+    from app.services import curriculum
+    print(json.dumps(curriculum.import_prospectus_2025(None), indent=2, default=str))
+elif a.cmd == "embed":
+    print(json.dumps({"embedded_now": knowledge.backfill_embeddings()}))
 elif a.cmd == "verify":
     import re
     from app import db
