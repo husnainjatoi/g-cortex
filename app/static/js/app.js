@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { h, clear, toast } from './ui.js';
+import { h, clear, toast, put, passwordInput, field, form } from './ui.js';
 import { createChat } from './chat.js';
 
 const root = document.getElementById('app');
@@ -42,6 +42,7 @@ export const refresh = () => route();
 
 async function route() {
   if (!S.user) return renderLogin();
+  if (S.user.must_change_password) return document.getElementById('force-password') ? undefined : renderForcePasswordChange();   // nothing else is reachable until the password is changed
   const path = (location.hash.replace(/^#/, '') || '').split('?')[0];
   if (!routes[path]) { location.hash = home(); return; }
   document.body.classList.toggle('on-assistant', path === '/assistant');
@@ -110,7 +111,7 @@ function renderLogin() {
   clear(root);
   const err = h('div');
   const email = h('input', { type: 'email', name: 'email', required: true, autocomplete: 'username', placeholder: 'u2024405@giki.edu.pk' });
-  const pw = h('input', { type: 'password', name: 'password', required: true, autocomplete: 'current-password' });
+  const pwWrap = passwordInput({ name: 'password', required: true, autocomplete: 'current-password' }); const pw = pwWrap.querySelector('input');
   const btn = h('button', { class: 'btn primary', type: 'submit', style: 'width:100%;justify-content:center;padding:11px' }, 'Sign in');
   const f = h('form', { onsubmit: async (e) => {
     e.preventDefault(); btn.disabled = true; clear(err);
@@ -118,7 +119,7 @@ function renderLogin() {
     catch (ex) { err.append(h('div', { class: 'alert bad' }, ex.message)); btn.disabled = false; }
   } },
     h('h1', null, 'Sign in'), h('p', { class: 'muted', style: 'margin:0 0 18px' }, 'Use your GIKI email and portal password. Your role is determined by your account record.'),
-    err, h('div', { class: 'field' }, h('label', null, 'Email'), email), h('div', { class: 'field' }, h('label', null, 'Password'), pw), btn,
+    err, h('div', { class: 'field' }, h('label', null, 'Email'), email), h('div', { class: 'field' }, h('label', null, 'Password'), pwWrap), btn,
     h('p', { class: 'hint', style: 'margin-top:14px' }, 'Forgot your password or no account yet? Contact the Directorate of Student Affairs / IT office to be provisioned.'));
   root.append(h('div', { class: 'login-wrap' },
     h('section', { class: 'login-hero' }, h('img', { src: '/static/img/logo.png', alt: 'G-Cortex logo' }), h('h1', null, 'G-Cortex'),
@@ -129,17 +130,32 @@ function renderLogin() {
 }
 
 function boot(u) {
-  S.user = u; layout();
-  if (u.must_change_password) return forcePasswordChange();
+  S.user = u;
+  if (u.must_change_password) return renderForcePasswordChange();
+  layout();
   if (!location.hash || !routes[location.hash.replace(/^#/, '').split('?')[0]]) location.hash = home(); else route();
 }
 
-async function forcePasswordChange() {
-  const { modal, field, form } = await import('./ui.js');
-  const body = form([field('Current password', h('input', { type: 'password', name: 'current_password', required: true })), field('New password', h('input', { type: 'password', name: 'new_password', required: true, minlength: 8 }), 'At least 8 characters with letters and digits')],
-    async (d) => { await api.post('/api/auth/change-password', d); toast('Password changed. Please sign in again.', 'ok'); S.user = null; location.hash = ''; renderLogin(); },
-    'Change password');
-  modal({ title: 'Set a new password', body: h('div', null, h('div', { class: 'alert warn' }, 'Your account uses a temporary password. Choose a new one to continue.'), body) });
+// Dedicated, full-page screen shown while the account still uses its temporary password (the server also refuses every other API call).
+function renderForcePasswordChange() {
+  clear(root); document.body.classList.remove('on-assistant');
+  const f = form([
+    h('div', { class: 'field', style: 'grid-column:1/-1' }, h('label', null, 'Current (temporary) password'), passwordInput({ name: 'current_password', autocomplete: 'current-password' })),
+    h('div', { class: 'field', style: 'grid-column:1/-1' }, h('label', null, 'New password'), passwordInput({ name: 'new_password', autocomplete: 'new-password' }), h('div', { class: 'hint' }, 'At least 8 characters, with letters and digits. It must differ from the temporary password.')),
+    h('div', { class: 'field', style: 'grid-column:1/-1' }, h('label', null, 'Confirm new password'), passwordInput({ name: 'confirm_password', autocomplete: 'new-password' }))],
+    async (d) => {
+      await api.post('/api/auth/change-password', d);               // the server revokes old sessions and sets a fresh cookie
+      const me = await api.get('/api/auth/me');                      // proves the renewed session works
+      toast('Your password has been changed. Welcome to G-Cortex!', 'ok', 6000);
+      location.hash = ''; boot(me);
+    }, 'Set new password');
+  f.querySelector('.form-grid').style.gridTemplateColumns = '1fr';
+  root.append(h('div', { class: 'force-wrap' }, h('div', { class: 'force-card', id: 'force-password' },
+    h('img', { src: '/static/img/logo.png', alt: 'G-Cortex', style: 'height:44px' }),
+    h('h1', { style: 'margin:10px 0 6px' }, `Welcome to G-Cortex, ${S.user.full_name.split(' ')[0]}`),
+    h('p', { class: 'muted' }, 'Your account was created with a temporary password that is based on information the university already holds. To keep your account and personal records safe, please choose a private password before you continue.'),
+    h('div', { class: 'alert warn' }, 'You cannot use the portal until you set a new password.'), f,
+    h('p', { style: 'margin-top:14px' }, h('button', { class: 'linkbtn', type: 'button', onclick: async () => { await api.post('/api/auth/logout').catch(() => {}); S.user = null; location.hash = ''; renderLogin(); } }, 'Sign out')))));
 }
 
 window.addEventListener('hashchange', () => { if (S.user) route(); });
