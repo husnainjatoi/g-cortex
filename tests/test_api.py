@@ -140,13 +140,17 @@ def test_billing_flow_over_http(app):
     first = clock.today().replace(day=1)
     with db.tx() as cur:
         cur.execute("INSERT INTO mess_ledger (user_id, meal_date, meal_type, status, source) VALUES ('2024405', %s, 'lunch', 'consumed', 'turnstile'), ('2024405', %s, 'dinner', 'consumed', 'turnstile')", (first, first))
+    assert adm.post("/api/mess/admin/expenses", json={"month": first.strftime("%Y-%m"), "amount_pkr": 4000, "description": "groceries"}).status_code == 200
+    assert stu.post("/api/mess/admin/expenses", json={"month": first.strftime("%Y-%m"), "amount_pkr": 1}).status_code == 403
     bill = stu.get("/api/mess/me/bill").json()
-    assert bill["kind"] == "estimate" and bill["amount_pkr"] == 190 and bill["days_consumed"] == 1
+    assert bill["kind"] == "estimate" and bill["amount_pkr"] == 4000 and bill["students_using_mess"] == 1 and bill["days_consumed"] == 1
+    assert "estimated mess bill" in bill["disclaimer"]
     assert stu.get("/api/mess/me/bill?student_id=2024668").status_code == 403
     assert stu.get("/api/mess/me/invoices").json() == []
     assert stu.post("/api/mess/admin/invoices/generate", json={"month": first.strftime("%Y-%m")}).status_code == 403
     assert adm.post("/api/mess/admin/invoices/generate", json={"month": first.strftime("%Y-%m")}).status_code == 409   # month still open
-    assert stu.get("/api/mess/me/deposit").json()["status"] == "not_configured"
+    d = stu.get("/api/mess/me/deposit").json()
+    assert (d["original_deposit_pkr"], d["status"], d["refundable_balance_pkr"]) == (15000, "paid", 15000)
     assert stu.get("/api/mess/admin/deposits").status_code == 403
     assert stu.post("/api/mess/me/clearance").json()["status"] == "requested"
     assert stu.get("/api/mess/admin/clearances").status_code == 403

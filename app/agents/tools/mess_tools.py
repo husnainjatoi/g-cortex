@@ -25,9 +25,10 @@ def get_menu_and_macros(meal: str = "") -> dict:
 
 @tool
 def get_my_estimated_mess_bill(month: str = "") -> dict:
-    """Your mess bill for a month, calculated by the backend from your VERIFIED meal-attendance records and the configured
-    rates. For the current/open month this is an ESTIMATE; for a month already invoiced it is the finalized invoice. Report
-    the numbers and the 'explanation' exactly; never calculate prices yourself, and say so if rates are not configured.
+    """Your mess bill for a month as calculated by the backend. For the current/open month this is an ESTIMATE = total food expenditure of
+    the period / number of distinct students who used the mess in that period (the backend returns both figures and the result); for a month
+    already invoiced it is the finalized invoice. Report the figures and 'explanation' exactly, ALWAYS include the 'disclaimer' text for an
+    estimate, never calculate prices yourself, and say so if the expenditure has not been entered yet.
 
     Args:
         month: Optional YYYY-MM (empty = current month). For 'last month' pass the previous month's YYYY-MM using get_today.

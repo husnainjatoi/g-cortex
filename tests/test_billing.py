@@ -40,39 +40,94 @@ def test_mess_out_creates_no_financial_records(actors, at):
     assert db.query_one("SELECT est_rebate_pkr FROM mess_out_requests")["est_rebate_pkr"] is None
 
 
-def test_estimate_per_meal_matches_configured_rates(actors, at):
-    s1 = actors["s1"]
-    est = billing.estimate_bill(s1)
-    assert est["kind"] == "estimate" and est["amount_pkr"] is None or est["days_consumed"] == 0   # nothing eaten / no rates
-    rates(actors)
-    for day in (2, 3, 4):
-        eat("2024405", NOV.replace(day=day), "lunch")
-    eat("2024405", NOV.replace(day=2), "dinner"); eat("2024405", NOV.replace(day=2), "breakfast")
-    est = billing.estimate_bill(s1)
-    assert est["kind"] == "estimate" and est["month"] == "2026-11"
-    assert est["days_consumed"] == 3 and est["meals"] == {"breakfast": 1, "lunch": 3, "dinner": 1}
-    assert est["amount_pkr"] == 1 * 50 + 3 * 120 + 1 * 100 == 510
-    assert "ESTIMATE" in est["explanation"] and "not an invoice" in est["explanation"]
+DISCLAIMER = ("This is an estimated mess bill calculated using the total food expenditure divided by the number of students using the mess. "
+              "Your actual monthly bill may differ. This estimate is provided only to help you understand and plan your expected expenses.")
 
 
-def test_estimate_without_configured_rates_is_not_invented(actors, at):
+def test_estimate_is_total_food_expenditure_divided_by_students_using_the_mess(actors, at):
+    adm = actors["mess"]
+    billing.add_expense(adm, "2026-11", 2_000_000, "vegetables and meat"); billing.add_expense(adm, "2026-11", 1_000_000, "rice, flour, oil")
+    billing.add_expense(adm, "2026-10", 9_999_999, "previous month - must not leak into November")
+    for uid in ("2024405", "2024668", "2024662"):
+        eat(uid, NOV.replace(day=2), "lunch")
+    eat("2024405", NOV.replace(day=2), "dinner"); eat("2024405", NOV.replace(day=3), "lunch")          # extra meals of the same student: still ONE student
+    est = billing.estimate_bill(actors["s1"])
+    assert est["kind"] == "estimate" and est["billing_period"]["month"] == "2026-11"
+    assert est["total_food_expenditure_pkr"] == 3_000_000 and est["students_using_mess"] == 3
+    assert est["estimated_per_student_pkr"] == 1_000_000.0 and est["amount_pkr"] == 1_000_000.0
+    assert est["disclaimer"] == DISCLAIMER and "ESTIMATE (not an invoice)" in est["explanation"] and "3,000,000.00 / 3 students" in est["explanation"]
+    assert est["invoice"] is None
+    assert billing.estimate_bill(actors["s2"])["amount_pkr"] == 1_000_000.0                                # same shared figure for every mess user
+    assert billing.month_cost_summary(actors["s1"], "2026-10")["students_using_mess"] == 0              # October has its own denominator
+
+
+def test_the_spec_example_3_million_over_1000_students():
+    from decimal import Decimal
+    assert (Decimal("3000000") / 1000).quantize(Decimal("0.01")) == Decimal("3000.00")                    # arithmetic of the requirement's worked example
+
+
+def test_denominator_counts_distinct_verified_users_not_registered_students(actors, at):
+    billing.add_expense(actors["mess"], "2026-11", 900, "test")
+    assert billing.estimate_bill(actors["s1"])["students_using_mess"] == 0                                # three registered students, nobody ate
+    eat("2024405", NOV.replace(day=2), "lunch"); eat("2024405", NOV.replace(day=2), "lunch")              # duplicate row cannot add a second student or meal
+    est = billing.estimate_bill(actors["s1"])
+    assert est["students_using_mess"] == 1 and est["meals"]["lunch"] == 1 and est["amount_pkr"] == 900.0
+    assert billing.estimate_bill(actors["s3"])["amount_pkr"] == 0.0                                       # a student who never ate this month has nothing to pay
+
+
+def test_estimate_unavailable_until_expenditure_is_entered(actors, at):
     eat("2024405", NOV.replace(day=2), "lunch")
     est = billing.estimate_bill(actors["s1"])
-    assert est["amount_pkr"] is None and "not been configured" in est["explanation"] and est["meals"]["lunch"] == 1
+    assert est["amount_pkr"] is None and "has not entered the food expenditure" in est["explanation"] and est["disclaimer"] == DISCLAIMER
+    with pytest.raises(Forbidden):
+        billing.add_expense(actors["s1"], "2026-11", 100, "x")
+    with pytest.raises(Forbidden):
+        billing.add_expense(actors["acad"], "2026-11", 100, "x")
+    with pytest.raises(ValidationFailed):
+        billing.add_expense(actors["mess"], "2026-11", 0, "x")
 
 
-def test_per_day_mode_charges_each_day_once(actors, at):
+def test_shared_cost_invoice_matches_the_formula_and_is_final(actors, at):
+    settings.update(actors["mess"], "mess_billing_mode", "shared_cost")
+    billing.add_expense(actors["mess"], "2026-11", 600, "food")
+    eat("2024405", NOV.replace(day=2), "lunch"); eat("2024668", NOV.replace(day=2), "lunch")                # 2 users -> 300 each; s3 never ate
+    at(2026, 12, 2)
+    live = billing.estimate_bill(actors["s1"], month="2026-11")["amount_pkr"]
+    assert live == 300.0
+    r = billing.generate_monthly_invoices(actors["mess"], "2026-11")
+    assert r["created"] == 2 and billing.my_invoices(actors["s3"]) == []
+    inv = billing.my_invoices(actors["s1"])[0]
+    assert inv["total_pkr"] == 300.0 and inv["lines"][0]["students_using_mess"] == 2 and inv["lines"][0]["total_food_expenditure_pkr"] == 600.0
+    est = billing.estimate_bill(actors["s1"], month="2026-11")
+    assert est["kind"] == "finalized" and est["amount_pkr"] == 300.0 and est["invoice"]["invoice_no"] == inv["invoice_no"]       # estimate and invoice are separate things
+    with pytest.raises(RuleViolation) as e:
+        billing.add_expense(actors["mess"], "2026-11", 50, "late entry")
+    assert e.value.code == "period_closed"
+
+
+def test_shared_cost_invoices_require_recorded_expenditure(actors, at):
+    settings.update(actors["mess"], "mess_billing_mode", "shared_cost")
+    eat("2024405", NOV.replace(day=2), "lunch")
+    at(2026, 12, 2)
+    with pytest.raises(RuleViolation) as e:
+        billing.generate_monthly_invoices(actors["mess"], "2026-11")
+    assert e.value.code == "expenses_missing" and db.query_one("SELECT COUNT(*) AS n FROM mess_invoices")["n"] == 0
+
+
+
+def test_per_day_mode_invoices_charge_each_day_once(actors, at):
     settings.update(actors["mess"], "mess_billing_mode", "per_day")
     billing.set_rate(actors["mess"], "daily", 300, "2026-01-01")
     for meal in ("breakfast", "lunch", "dinner"):
         eat("2024405", NOV.replace(day=2), meal)
     eat("2024405", NOV.replace(day=3), "lunch")
-    est = billing.estimate_bill(actors["s1"])
-    assert est["days_consumed"] == 2 and est["amount_pkr"] == 600.0
-
+    at(2026, 12, 2)
+    billing.generate_monthly_invoices(actors["mess"], "2026-11")
+    inv = billing.my_invoices(actors["s1"])[0]
+    assert inv["days_count"] == 2 and inv["total_pkr"] == 600.0
 
 def test_duplicate_and_invalid_scans_are_never_billed(actors, at):
-    rates(actors)
+    billing.add_expense(actors["mess"], "2026-11", 1000, "food")
     qr = mess.generate_qr(actors["s1"], "lunch")
     mess.verify_entry(actors["mess"], qr["payload"], "lunch")
     with pytest.raises(RuleViolation):
@@ -83,8 +138,7 @@ def test_duplicate_and_invalid_scans_are_never_billed(actors, at):
     with pytest.raises(RuleViolation):
         mess.verify_entry(actors["mess"], "GCQR:2024405:lunch:00000000", "lunch")                         # forged
     est = billing.estimate_bill(actors["s1"])
-    assert est["meals"]["lunch"] == 1 and est["amount_pkr"] == 120.0
-
+    assert est["meals"]["lunch"] == 1 and est["students_using_mess"] == 1 and est["amount_pkr"] == 1000.0
 
 def test_rate_changes_apply_prospectively_and_require_scope(actors, at):
     with pytest.raises(Forbidden):
@@ -96,8 +150,9 @@ def test_rate_changes_apply_prospectively_and_require_scope(actors, at):
     rates(actors)
     billing.set_rate(actors["mess"], "lunch", 200, "2026-11-10")              # new rate from the 10th
     eat("2024405", NOV.replace(day=5), "lunch"); eat("2024405", NOV.replace(day=12), "lunch")
-    assert billing.estimate_bill(actors["s1"])["amount_pkr"] == 120 + 200
-
+    at(2026, 12, 2)
+    billing.generate_monthly_invoices(actors["mess"], "2026-11")
+    assert billing.my_invoices(actors["s1"])[0]["total_pkr"] == 120 + 200
 
 def test_invoice_generation_after_month_end_is_idempotent_and_immutable(actors, at):
     rates(actors)
@@ -209,53 +264,72 @@ def test_students_cannot_see_other_students_billing(actors, at):
         billing.list_invoices(actors["s2"])
 
 
-def test_security_deposit_lifecycle(actors, at):
-    s1, adm = actors["s1"], actors["mess"]
-    assert billing.deposit_summary(s1)["status"] == "not_configured"
-    with pytest.raises(RuleViolation) as e:
-        billing.record_deposit_payment(adm, "2024405", 1000, "DEP-0001", True)
-    assert e.value.code == "deposit_unconfigured"
+def test_every_student_has_the_15000_deposit_paid_at_admission(actors):
+    for k in ("s1", "s2", "s3"):
+        d = billing.deposit_summary(actors[k])
+        assert (d["original_deposit_pkr"], d["status"], d["verified_paid_pkr"], d["refundable_balance_pkr"]) == (15000.0, "paid", 15000.0, 15000.0)
+        assert [t["kind"] for t in d["transactions"]] == ["deposit_payment"] and d["transactions"][0]["reference"].startswith("ADMISSION-")
+    n = db.query_one("SELECT COUNT(*) AS n FROM mess_deposit_accounts")["n"]
+    assert billing.ensure_all_student_deposits(paid=True) == 0                        # idempotent: no duplicates
+    assert db.query_one("SELECT COUNT(*) AS n FROM mess_deposit_accounts")["n"] == n
+    assert db.query_one("SELECT COUNT(*) AS n FROM mess_deposit_transactions WHERE kind='deposit_payment'")["n"] == n
+
+
+def test_new_students_get_a_deposit_account_automatically(actors):
+    from app.services import auth
+    try:
+        auth.create_user(actors["super"], user_id="NEW5001", full_name="New Student", email="new5001@giki.edu.pk", role="student", date_of_birth="2005-03-09", use_initial_password=True)
+        d = billing.deposit_summary(actors["super"], "NEW5001")
+        assert (d["original_deposit_pkr"], d["status"]) == (15000.0, "unpaid") and d["transactions"] == []        # status tracked: awaiting payment
+        billing.record_deposit_payment(actors["mess"], "NEW5001", 15000, "ADMISSION-NEW5001", True)
+        assert billing.deposit_summary(actors["super"], "NEW5001")["status"] == "paid"
+        auth.create_user(actors["super"], user_id="NEW5002", full_name="Paid Student", email="new5002@giki.edu.pk", role="student", date_of_birth="2005-03-10", use_initial_password=True, deposit_received=True)
+        assert billing.deposit_summary(actors["super"], "NEW5002")["refundable_balance_pkr"] == 15000.0
+    finally:
+        with db.tx() as cur:
+            for u in ("NEW5001", "NEW5002"):
+                cur.execute("DELETE FROM mess_deposit_transactions WHERE user_id=%s", (u,)); cur.execute("DELETE FROM mess_deposit_accounts WHERE user_id=%s", (u,))
+                cur.execute("DELETE FROM student_profiles WHERE user_id=%s", (u,)); cur.execute("DELETE FROM users WHERE user_id=%s", (u,))
+
+
+def test_deposit_admin_rules_and_verification(actors):
+    adm, s1 = actors["mess"], actors["s1"]
     with pytest.raises(Forbidden):
         settings.update(actors["acad"], "mess_deposit_amount", "5000")
-    settings.update(adm, "mess_deposit_amount", "5000")
-    summary = billing.record_deposit_payment(adm, "2024405", 3000, "DEP-0001", False)
-    assert summary["original_deposit_pkr"] == 5000 and summary["status"] == "unpaid" and summary["pending_verification_pkr"] == 3000
+    with db.tx() as cur:                                              # fresh account to exercise partial payment + verification
+        cur.execute("DELETE FROM mess_deposit_transactions WHERE user_id='2024668'")
+    d = billing.deposit_summary(actors["s2"])
+    assert d["status"] == "unpaid"
+    r = billing.record_deposit_payment(adm, "2024668", 9000, "DEP-0001", False)
+    assert r["status"] == "unpaid" and r["pending_verification_pkr"] == 9000
     with pytest.raises(Forbidden):
-        billing.verify_deposit_txn(s1, summary["transactions"][0]["txn_id"], True)
-    billing.verify_deposit_txn(adm, summary["transactions"][0]["txn_id"], True)
-    assert billing.deposit_summary(s1)["status"] == "partial"
+        billing.verify_deposit_txn(actors["s2"], r["transactions"][0]["txn_id"], True)
+    billing.verify_deposit_txn(adm, r["transactions"][0]["txn_id"], True)
+    assert billing.deposit_summary(actors["s2"])["status"] == "partial"
     with pytest.raises(RuleViolation):
-        billing.record_deposit_payment(adm, "2024405", 2500, "DEP-0002", True)   # would exceed required amount
+        billing.record_deposit_payment(adm, "2024668", 7000, "DEP-0002", True)          # would exceed 15,000
     with pytest.raises(Conflict):
-        billing.record_deposit_payment(adm, "2024405", 100, "DEP-0001", True)
-    billing.record_deposit_payment(adm, "2024405", 2000, "DEP-0003", True)
-    d = billing.deposit_summary(s1)
-    assert d["status"] == "paid" and d["refundable_balance_pkr"] == 5000 and len(d["transactions"]) == 2
-    settings.update(adm, "mess_deposit_amount", "9000")                          # config change does not alter existing record
-    assert billing.deposit_summary(s1)["original_deposit_pkr"] == 5000
-
+        billing.record_deposit_payment(adm, "2024668", 100, "DEP-0001", True)
+    billing.record_deposit_payment(adm, "2024668", 6000, "DEP-0003", True)
+    assert billing.deposit_summary(actors["s2"])["status"] == "paid"
+    settings.update(adm, "mess_deposit_amount", "20000")                                # config change never alters an existing record
+    assert billing.deposit_summary(s1)["original_deposit_pkr"] == 15000
 
 def test_deposit_is_not_prepaid_credit(actors, at):
     no = _invoiced(actors, at)
-    settings.update(actors["mess"], "mess_deposit_amount", "5000")
-    billing.record_deposit_payment(actors["mess"], "2024405", 5000, "DEP-9", True)
     inv = billing.get_invoice(actors["s1"], no)
-    assert inv["status"] == "unpaid" and inv["balance_pkr"] == 360.0             # bill NOT auto-deducted from the deposit
-    assert billing.deposit_summary(actors["s1"])["refundable_balance_pkr"] == 5000
-
+    assert inv["status"] == "unpaid" and inv["balance_pkr"] == 360.0             # bill NOT auto-deducted from the 15,000 deposit
+    assert billing.deposit_summary(actors["s1"])["refundable_balance_pkr"] == 15000
 
 def test_final_clearance_settlement(actors, at):
     no = _invoiced(actors, at)                                                    # Nov bill 360 unpaid
     for day in (3, 4):
-        eat("2024405", datetime.date(2026, 12, day), "dinner")                    # December consumption, not yet invoiced
+        eat("2024405", datetime.date(2026, 12, day), "dinner")                    # December consumption, not yet invoiced (2 x 100)
     s1, adm = actors["s1"], actors["mess"]
-    settings.update(adm, "mess_deposit_amount", "5000")
-    billing.record_deposit_payment(adm, "2024405", 5000, "DEP-C1", True)
     prev = billing.clearance_preview(s1)
-    assert prev["deposit_balance_pkr"] == 5000 and prev["outstanding_invoices_pkr"] == 360 and prev["uninvoiced_consumption_pkr"] == 200
-    assert prev["refundable_pkr"] == 5000 - 560 and prev["additional_due_pkr"] == 0
-    r = billing.request_clearance(s1)
-    cid = r["clearance_id"]
+    assert prev["deposit_balance_pkr"] == 15000 and prev["outstanding_invoices_pkr"] == 360 and prev["uninvoiced_consumption_pkr"] == 200
+    assert prev["refundable_pkr"] == 15000 - 560 and prev["additional_due_pkr"] == 0
+    cid = billing.request_clearance(s1)["clearance_id"]
     with pytest.raises(Conflict):
         billing.request_clearance(s1)
     with pytest.raises(Forbidden):
@@ -265,46 +339,41 @@ def test_final_clearance_settlement(actors, at):
     assert db.query_one("SELECT COUNT(*) AS n FROM mess_deposit_transactions WHERE kind IN ('refund','settlement_deduction')")["n"] == 0   # nothing automatic
     billing.review_clearance(adm, cid, True, "documents verified")
     out = billing.settle_clearance(adm, cid)
-    assert out["deductions_pkr"] == 560 and out["refundable_pkr"] == 4440 and out["additional_due_pkr"] == 0
-    assert billing.get_invoice(s1, no)["status"] == "paid"
-    assert len(billing.my_invoices(s1)) == 2                                      # December was finalized during settlement
+    assert out["deductions_pkr"] == 560 and out["refundable_pkr"] == 14440 and out["additional_due_pkr"] == 0
+    assert billing.get_invoice(s1, no)["status"] == "paid" and len(billing.my_invoices(s1)) == 2
     d = billing.deposit_summary(s1)
-    assert d["deductions_pkr"] == 560 and d["refundable_balance_pkr"] == 0 and d["refunded_or_reserved_pkr"] == 4440
+    assert d["deductions_pkr"] == 560 and d["refundable_balance_pkr"] == 0 and d["refunded_or_reserved_pkr"] == 14440
     assert [t["kind"] for t in d["transactions"]].count("settlement_deduction") == 2
-    refund = next(t for t in d["transactions"] if t["kind"] == "refund")
-    assert refund["status"] == "pending"                                          # refund is not "returned" until an admin records it
+    assert next(t for t in d["transactions"] if t["kind"] == "refund")["status"] == "pending"      # not "returned" until an admin records it
     with pytest.raises(RuleViolation):
-        billing.mark_refund_returned(adm, cid, "CHQ-1234") if False else billing.settle_clearance(adm, cid)
+        billing.settle_clearance(adm, cid)
     billing.mark_refund_returned(adm, cid, "CHQ-1234")
     d = billing.deposit_summary(s1)
     assert d["clearance"]["status"] == "returned" and d["clearance"]["return_reference"] == "CHQ-1234" and d["status"] == "refunded"
 
-
 def test_clearance_with_dues_exceeding_deposit(actors, at):
-    no = _invoiced(actors, at)
+    billing.set_rate(actors["mess"], "lunch", 7000, "2026-01-01"); billing.set_rate(actors["mess"], "breakfast", 1, "2026-01-01"); billing.set_rate(actors["mess"], "dinner", 1, "2026-01-01")
+    for day in (3, 4, 5):
+        eat("2024405", NOV.replace(day=day), "lunch")                              # 3 x 7000 = 21000 > 15000 deposit
+    at(2026, 12, 2)
+    billing.generate_monthly_invoices(actors["mess"], "2026-11")
     s1, adm = actors["s1"], actors["mess"]
-    settings.update(adm, "mess_deposit_amount", "200")
-    billing.record_deposit_payment(adm, "2024405", 200, "DEP-L", True)
     cid = billing.request_clearance(s1)["clearance_id"]
     billing.review_clearance(adm, cid, True)
     out = billing.settle_clearance(adm, cid)
-    assert out["deductions_pkr"] == 200 and out["refundable_pkr"] == 0 and out["additional_due_pkr"] == 160
-    assert billing.get_invoice(s1, no)["balance_pkr"] == 160.0
+    assert out["deductions_pkr"] == 15000 and out["refundable_pkr"] == 0 and out["additional_due_pkr"] == 6000
+    assert billing.get_invoice(s1, "INV-202611-2024405")["balance_pkr"] == 6000.0
     assert db.query_one("SELECT COUNT(*) AS n FROM mess_deposit_transactions WHERE kind='refund'")["n"] == 0
-
 
 def test_clearance_blocked_by_unverified_receipts(actors, at):
     no = _invoiced(actors, at)
     adm = actors["mess"]
-    settings.update(adm, "mess_deposit_amount", "5000")
-    billing.record_deposit_payment(adm, "2024405", 5000, "DEP-B", True)
     billing.submit_payment(actors["s1"], no, 100, "BANK-77")
     cid = billing.request_clearance(actors["s1"])["clearance_id"]
     billing.review_clearance(adm, cid, True)
     with pytest.raises(RuleViolation) as e:
         billing.settle_clearance(adm, cid)
     assert e.value.code == "payments_unverified"
-
 
 def test_admin_dues_summary_and_reports(actors, at):
     _invoiced(actors, at)

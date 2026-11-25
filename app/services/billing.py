@@ -79,6 +79,8 @@ def current_rates(actor: Actor) -> dict:
 
 
 def _configured(hist, mode, day) -> bool:
+    if mode == "shared_cost":
+        return True                                   # uses recorded food expenditure instead of per-meal rates
     need = ("daily",) if mode == "per_day" else MEALS
     return all(_rate_on(hist, m, day) is not None for m in need)
 
@@ -169,33 +171,64 @@ def _outstanding_total(cur, user_id: str) -> float:
     return round(sum(max(0.0, _invoice(cur, r["invoice_id"])["balance_pkr"]) for r in cur.fetchall()), 2)
 
 
+ESTIMATE_DISCLAIMER = ("This is an estimated mess bill calculated using the total food expenditure divided by the number of students using the mess. "
+                       "Your actual monthly bill may differ. This estimate is provided only to help you understand and plan your expected expenses.")
+
+
+def _cost_share(cur, ms: datetime.date) -> dict:
+    """Shared-cost figures for ONE billing period: total food expenditure and the number of DISTINCT students with verified meals in that same period."""
+    cur.execute("SELECT COALESCE(SUM(amount_pkr),0) AS total, COUNT(*) AS lines FROM mess_expenses WHERE period=%s", (ms,))
+    e = cur.fetchone()
+    cur.execute("""SELECT COUNT(DISTINCT user_id) AS n FROM mess_ledger WHERE status='consumed' AND meal_date BETWEEN %s AND %s""", (ms, _month_end(ms)))
+    users = cur.fetchone()["n"]
+    total = _d(e["total"])
+    share = (total / users).quantize(Q) if (e["lines"] and users) else None
+    return {"total_expenditure": total, "expense_entries": e["lines"], "students_using": users, "per_student": share}
+
+
+def month_cost_summary(actor: Actor, month: str | None = None) -> dict:
+    ms = month_start(month)
+    with db.tx() as cur:
+        c = _cost_share(cur, ms)
+    return {"month": ms.strftime("%Y-%m"), "total_food_expenditure_pkr": float(c["total_expenditure"]), "students_using_mess": c["students_using"],
+            "estimated_per_student_pkr": float(c["per_student"]) if c["per_student"] is not None else None, "expense_entries": c["expense_entries"], "disclaimer": ESTIMATE_DISCLAIMER}
+
+
 def estimate_bill(actor: Actor, student_id: str | None = None, month: str | None = None) -> dict:
-    """Current-month ESTIMATE (never a bill) or, for a month that has been invoiced, the finalized invoice."""
+    """ESTIMATE for a month = total food expenditure / distinct students who used the mess in that same month (both from live data),
+    or, when the month has already been invoiced, the finalized invoice. An estimate is never a liability and never a bill."""
     sid = actor.resolve_student(student_id, "mess")
     ms = month_start(month)
     with db.tx() as cur:
         mode, hist = settings.get(cur, "mess_billing_mode"), _rate_history(cur)
         inv = _invoice(cur, user_id=sid, ms=ms)
         prev = _invoice(cur, user_id=sid, ms=(ms - datetime.timedelta(days=1)).replace(day=1))
-        priced = _price(_consumption(cur, sid, ms), hist, mode)
-        out = {"student_id": sid, "month": ms.strftime("%Y-%m"), "billing_mode": mode, "days_consumed": priced["days_count"], "meals": priced["meals"],
-               "lines": priced["lines"], "rates_configured": not priced["missing_rates"] and _configured(hist, mode, min(clock.today(), _month_end(ms))),
-               "outstanding_total_pkr": _outstanding_total(cur, sid),
+        rows = _consumption(cur, sid, ms)
+        counts = {m: sum(1 for r in rows if r["meal_type"] == m) for m in MEALS}
+        days = len({r["meal_date"] for r in rows})
+        cost = _cost_share(cur, ms)
+        out = {"student_id": sid, "month": ms.strftime("%Y-%m"), "billing_period": {"month": ms.strftime("%Y-%m"), "start": str(ms), "end": str(_month_end(ms))},
+               "billing_mode": mode, "days_consumed": days, "meals": counts, "outstanding_total_pkr": _outstanding_total(cur, sid), "disclaimer": ESTIMATE_DISCLAIMER,
+               "total_food_expenditure_pkr": float(cost["total_expenditure"]), "students_using_mess": cost["students_using"], "estimated_per_student_pkr": float(cost["per_student"]) if cost["per_student"] is not None else None,
+               "expense_entries": cost["expense_entries"], "lines": [],
                "previous_invoice": ({k: prev[k] for k in ("invoice_no", "billing_month_label", "total_pkr", "balance_pkr", "status", "due_date")} if prev else None)}
         if inv:
-            out.update(kind="finalized", amount_pkr=inv["total_pkr"], invoice=inv,
-                       explanation=f"Finalized invoice {inv['invoice_no']} for {out['month']}: PKR {inv['total_pkr']:.2f} (balance PKR {inv['balance_pkr']:.2f}, {inv['status']}).")
-        else:
-            out.update(kind="estimate", amount_pkr=(float(priced["amount_pkr"]) if priced["amount_pkr"] is not None else None), invoice=None)
-            is_past = _month_end(ms) < clock.today()
-            if priced["missing_rates"]:
-                out["explanation"] = "Mess rates have not been configured by the Mess Office, so an amount cannot be calculated yet."
-            elif priced["days_count"] == 0:
-                out["explanation"] = f"No meals recorded in {out['month']} yet, so the estimate is PKR 0.00."
-            else:
-                parts = " + ".join(f"{l['count']} × PKR {l['rate_pkr']:g}" for l in priced["lines"] if l["rate_pkr"] is not None)
-                out["explanation"] = (f"ESTIMATE (not an invoice): {parts} = PKR {out['amount_pkr']:.2f} from {priced['days_count']} day(s) with verified turnstile entries"
-                                      + (". This month has ended; the invoice will be generated shortly." if is_past else ". It changes as you eat and is finalized after month end."))
+            out.update(kind="finalized", amount_pkr=inv["total_pkr"], invoice=inv, lines=inv["lines"],
+                       explanation=f"Finalized invoice {inv['invoice_no']} for {out['month']}: PKR {inv['total_pkr']:.2f} (balance PKR {inv['balance_pkr']:.2f}, {inv['status']}). This is the confirmed amount; estimates no longer apply to this month.")
+            return out
+        out.update(kind="estimate", invoice=None)
+        if cost["per_student"] is None:
+            out["amount_pkr"] = None
+            out["explanation"] = ("The estimate cannot be calculated yet because " + ("the Mess Office has not entered the food expenditure for this period." if not cost["expense_entries"] else "no student has used the mess in this period.")
+                                  + " Estimate = total food expenditure / students using the mess.")
+            return out
+        per = float(cost["per_student"])
+        out["amount_pkr"] = per if days > 0 else 0.0
+        out["lines"] = [{"label": "Total food expenditure", "amount_pkr": float(cost["total_expenditure"])}, {"label": "Students using the mess", "count": cost["students_using"]},
+                        {"label": "Share per student", "amount_pkr": per}]
+        calc = f"PKR {float(cost['total_expenditure']):,.2f} / {cost['students_using']} students = PKR {per:,.2f}"
+        out["explanation"] = (f"ESTIMATE (not an invoice) for {out['month']}: {calc}. " + ("You have eaten on %d day(s) this period. " % days if days else "You have no verified meals in this period yet, so your estimate is PKR 0.00. ")
+                              + "Your actual monthly bill may differ.")
         return out
 
 
@@ -207,10 +240,29 @@ def meals_detail(actor: Actor, student_id: str | None = None, month: str | None 
 
 # ── Invoices ────────────────────────────────────────────────
 
+def _priced(cur, user_id: str, ms: datetime.date, mode, hist) -> dict:
+    """Month charges for one student under the configured billing basis (shared_cost uses the same formula as the estimate)."""
+    rows = _consumption(cur, user_id, ms)
+    if mode != "shared_cost":
+        return _price(rows, hist, mode)
+    counts = {m: sum(1 for r in rows if r["meal_type"] == m) for m in MEALS}
+    days = len({r["meal_date"] for r in rows})
+    if days == 0:
+        return {"days_count": 0, "meals": counts, "lines": [], "amount_pkr": Decimal(0), "missing_rates": []}
+    c = _cost_share(cur, ms)
+    if c["per_student"] is None:
+        return {"days_count": days, "meals": counts, "lines": [], "amount_pkr": None, "missing_rates": ["food_expenditure"]}
+    return {"days_count": days, "meals": counts, "amount_pkr": c["per_student"], "missing_rates": [],
+            "lines": [{"label": "Share of total food expenditure", "count": c["students_using"], "rate_pkr": float(c["per_student"]), "amount_pkr": float(c["per_student"]),
+                       "total_food_expenditure_pkr": float(c["total_expenditure"]), "students_using_mess": c["students_using"]}]}
+
+
 def _generate_one(cur, actor, user_id: str, ms: datetime.date, mode, hist, due_days: int) -> dict | None:
-    priced = _price(_consumption(cur, user_id, ms), hist, mode)
+    priced = _priced(cur, user_id, ms, mode, hist)
     if priced["days_count"] == 0:
         return None                                    # never bill unconsumed meals
+    if priced["missing_rates"] == ["food_expenditure"]:
+        raise RuleViolation("The food expenditure for this month has not been entered yet; enter it before generating invoices.", code="expenses_missing")
     if priced["missing_rates"]:
         raise RuleViolation(f"Mess rates are not configured for: {', '.join(priced['missing_rates'])}. Configure them before generating invoices.", code="rates_missing")
     cur.execute("""INSERT INTO mess_invoices (invoice_no, user_id, billing_month, days_count, meals_breakfast, meals_lunch, meals_dinner, billing_mode,
@@ -569,7 +621,7 @@ def _settlement_calc(cur, user_id: str) -> dict:
     for r in cur.fetchall():
         if _invoice(cur, user_id=user_id, ms=r["m"]):
             continue
-        priced = _price(_consumption(cur, user_id, r["m"]), hist, mode)
+        priced = _priced(cur, user_id, r["m"], mode, hist)
         if priced["missing_rates"]:
             missing += priced["missing_rates"]
         else:
@@ -707,3 +759,57 @@ def mark_refund_returned(actor: Actor, clearance_id: int, return_reference: str)
         audit.log(cur, actor, "mess.clearance_return", "clearance", clearance_id, detail={"reference": return_reference})
         events.emit(cur, CLEARANCE_UPDATED, {"clearance_id": clearance_id, "user_id": c["user_id"], "status": "returned"})
     return {"ok": True, "clearance_id": clearance_id, "status": "returned"}
+
+
+def init_student_deposit(cur, user_id: str, paid: bool = False, recorded_by: str | None = None, amount=None) -> bool:
+    """Create the student's security-deposit account (idempotent). paid=True also records the admission payment as verified."""
+    amt = _d(amount if amount is not None else settings.get(cur, "mess_deposit_amount"))
+    if amt <= 0:
+        return False
+    cur.execute("INSERT INTO mess_deposit_accounts (user_id, required_amount_pkr) VALUES (%s,%s) ON CONFLICT (user_id) DO NOTHING", (user_id, amt))
+    created = cur.rowcount > 0
+    if paid:
+        cur.execute("""INSERT INTO mess_deposit_transactions (user_id, kind, amount_pkr, reference, status, note, recorded_by, verified_by, verified_at)
+                       SELECT %s,'deposit_payment',%s,%s,'verified','Paid at admission',%s,%s,now()
+                       WHERE NOT EXISTS (SELECT 1 FROM mess_deposit_transactions WHERE user_id=%s AND kind='deposit_payment' AND status <> 'rejected')""",
+                    (user_id, amt, f"ADMISSION-{user_id}", recorded_by, recorded_by, user_id))
+    return created
+
+
+def ensure_all_student_deposits(paid: bool = True) -> int:
+    """Idempotent initialisation for existing students (also run by the migration). Never duplicates or overwrites a record."""
+    n = 0
+    with db.tx() as cur:
+        cur.execute("SELECT user_id FROM users WHERE role='student' AND is_active")
+        for r in cur.fetchall():
+            n += int(init_student_deposit(cur, r["user_id"], paid=paid))
+    return n
+
+
+# ── Food expenditure ledger (numerator of the shared-cost formula) ──
+
+@op("mess.expense_add", "expense", "month")
+def add_expense(actor: Actor, month: str, amount_pkr: float, description: str = "", category: str = "food") -> dict:
+    actor.require_scope("mess")
+    ms = month_start(month)
+    try:
+        amt = _d(amount_pkr)
+    except Exception:
+        raise ValidationFailed("Please enter the amount as a number.")
+    if amt <= 0 or amt > 10_000_000_000:
+        raise ValidationFailed("Please enter an expenditure amount greater than zero.")
+    with db.tx() as cur:
+        cur.execute("SELECT 1 FROM mess_invoices WHERE billing_month=%s LIMIT 1", (ms,))
+        if cur.fetchone():
+            raise RuleViolation(f"Invoices for {ms:%Y-%m} are already finalized, so its food expenditure can no longer be changed.", code="period_closed")
+        cur.execute("INSERT INTO mess_expenses (period, category, description, amount_pkr, recorded_by) VALUES (%s,%s,%s,%s,%s) RETURNING expense_id",
+                    (ms, (category or "food")[:60], (description or "")[:200] or None, amt, actor.user_id))
+        eid = cur.fetchone()["expense_id"]
+        audit.log(cur, actor, "mess.expense_add", "expense", eid, detail={"month": str(ms), "amount_pkr": str(amt), "description": description})
+    return month_cost_summary(actor, ms.strftime("%Y-%m"))
+
+
+def list_expenses(actor: Actor, month: str | None = None) -> list[dict]:
+    actor.require_scope("mess")
+    where, p = ("WHERE e.period=%s", (month_start(month),)) if month else ("", ())
+    return db.query(f"SELECT e.*, u.full_name AS recorded_by_name FROM mess_expenses e LEFT JOIN users u ON u.user_id=e.recorded_by {where} ORDER BY e.period DESC, e.expense_id DESC LIMIT 200", p)

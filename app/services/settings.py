@@ -50,8 +50,8 @@ def update(actor: Actor, key: str, value: str) -> dict:
                 raise ValueError
         except ValueError:
             raise ValidationFailed(f"{key} must be a non-negative number.")
-    if key == "mess_billing_mode" and value not in ("per_meal", "per_day"):
-        raise ValidationFailed("mess_billing_mode must be per_meal or per_day.")
+    if key == "mess_billing_mode" and value not in ("shared_cost", "per_meal", "per_day"):
+        raise ValidationFailed("Billing basis must be shared cost, per meal or per day.")
     if key == "drop_deadline":
         import datetime
         try:

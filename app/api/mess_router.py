@@ -316,3 +316,25 @@ def settle_clearance(clearance_id: int, actor: Actor = Depends(current_actor)):
 @router.post("/admin/clearances/{clearance_id}/return")
 def return_refund(clearance_id: int, body: ReturnBody, actor: Actor = Depends(current_actor)):
     return billing.mark_refund_returned(actor, clearance_id, body.return_reference)
+
+
+class ExpenseBody(BaseModel):
+    month: str = Field(min_length=7, max_length=10)
+    amount_pkr: float = Field(gt=0, le=10000000000)
+    description: str = Field(default="", max_length=200)
+
+
+@router.get("/admin/expenses")
+def expenses(month: str | None = None, actor: Actor = Depends(current_actor)):
+    return billing.list_expenses(actor, month)
+
+
+@router.post("/admin/expenses")
+def add_expense(body: ExpenseBody, actor: Actor = Depends(current_actor)):
+    return billing.add_expense(actor, body.month, body.amount_pkr, body.description)
+
+
+@router.get("/admin/cost-summary")
+def cost_summary(month: str | None = None, actor: Actor = Depends(current_actor)):
+    actor.require_scope("mess")
+    return billing.month_cost_summary(actor, month)
