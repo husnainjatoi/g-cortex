@@ -365,7 +365,7 @@ class CentralOrchestrator:
                                        "No changes were made.")
                 except Exception as exc:
                     logger.error("Error invoking %s: %s", target, exc)
-                    results[target] = (f"⚠️ The {SUBAGENT_LABELS.get(target, target)} could not complete this request right now ({type(exc).__name__}). "
+                    results[target] = ("⚠️ The assistant could not complete this request right now. "
                                        "No changes were made. You can also do this directly from the portal pages.")
             reply = next(iter(results.values())) if len(results) == 1 else await self.synthesize_multi_agent_responses(query, results)
         else:

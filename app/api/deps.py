@@ -10,9 +10,20 @@ from app.services.actor import Actor
 from app.services.errors import Forbidden, ServiceError, Unauthenticated
 
 
+# While a temporary initial password is still in use, ONLY these endpoints work (enforced here, i.e. for every API, including the assistant).
+PASSWORD_CHANGE_ALLOWED = ("/api/auth/me", "/api/auth/logout", "/api/auth/change-password")
+
+
+class PasswordChangeRequired(Forbidden):
+    code = "password_change_required"
+
+
 def current_actor(request: Request) -> Actor:
     """The ONLY way a request obtains an identity: a valid server-side session cookie."""
-    return auth.authenticate(request.cookies.get(config.COOKIE_NAME))
+    actor = auth.authenticate(request.cookies.get(config.COOKIE_NAME))
+    if actor.must_change and request.url.path not in PASSWORD_CHANGE_ALLOWED:
+        raise PasswordChangeRequired("For your security, you must set a new password before you can use G-Cortex.")
+    return actor
 
 
 def optional_actor(request: Request) -> Actor | None:
@@ -32,7 +43,7 @@ def gate_key_ok(x_gate_key: str | None = Header(default=None)) -> bool:
 
 
 async def service_error_handler(request: Request, exc: ServiceError):
-    return JSONResponse(status_code=exc.status, content={"detail": exc.message, "code": exc.code, "details": exc.details})
+    return JSONResponse(status_code=exc.status, content={"detail": exc.message, "code": exc.code, "details": exc.details, **({"fields": exc.details["fields"]} if "fields" in exc.details else {})})
 
 
 async def csrf_guard(request: Request, call_next):

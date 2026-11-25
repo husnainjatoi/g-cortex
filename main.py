@@ -10,11 +10,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config, db
 from app.api import admin_router, auth_router, course_router, mess_router, orchestrator_router, portal_router, req_router
+from app.api import errors as api_errors
 from app.api.deps import csrf_guard, service_error_handler
 from app.services import billing, events, sports
 from app.services.errors import ServiceError
@@ -53,6 +56,9 @@ app = FastAPI(
 )
 app.middleware("http")(csrf_guard)
 app.add_exception_handler(ServiceError, service_error_handler)
+app.add_exception_handler(RequestValidationError, api_errors.validation_handler)
+app.add_exception_handler(StarletteHTTPException, api_errors.http_handler)
+app.add_exception_handler(Exception, api_errors.unhandled_handler)
 
 app.include_router(auth_router.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(portal_router.router, prefix="/api/portal", tags=["Portal"])
@@ -80,5 +86,5 @@ if _STATIC.exists():
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str = ""):
         if path.startswith(("api/", "static/")):
-            return JSONResponse(status_code=404, content={"detail": "Not found"})
+            return JSONResponse(status_code=404, content={"detail": "We couldn't find what you were looking for.", "code": "http_error"})
         return FileResponse(_STATIC / "index.html")

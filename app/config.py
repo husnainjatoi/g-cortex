@@ -32,3 +32,9 @@ MAX_FAILED_LOGINS = int(os.getenv("MAX_FAILED_LOGINS", "5"))
 LOCKOUT_MINUTES = int(os.getenv("LOCKOUT_MINUTES", "15"))
 BACKGROUND_JOBS = os.getenv("BACKGROUND_JOBS", "true").lower() == "true"
 ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "gemini-3.5-flash-lite")
+
+# Initial (temporary) administrator credential. Stored only as a hash after provisioning, never logged or returned by the API.
+# Override in the environment for any real deployment; users are forced to change it at first sign-in.
+ADMIN_INITIAL_PASSWORD = os.getenv("ADMIN_INITIAL_PASSWORD", "admin123")
+LOGIN_IP_LIMIT = int(os.getenv("LOGIN_IP_LIMIT", "30"))          # attempts per IP per window
+LOGIN_IP_WINDOW_SECONDS = int(os.getenv("LOGIN_IP_WINDOW_SECONDS", "300"))

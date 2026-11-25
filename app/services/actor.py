@@ -13,6 +13,7 @@ class Actor:
     scopes: frozenset = field(default_factory=frozenset)
     channel: str = "web"          # 'web' | 'assistant' | 'system'
     full_name: str = ""
+    must_change: bool = False     # initial credential still in use: only logout / change-password are allowed
 
     @property
     def is_admin(self) -> bool:
@@ -49,7 +50,7 @@ class Actor:
         raise Forbidden("You may only access your own records.")
 
     def as_channel(self, channel: str) -> "Actor":
-        return Actor(self.user_id, self.role, self.scopes, channel, self.full_name)
+        return Actor(self.user_id, self.role, self.scopes, channel, self.full_name, self.must_change)
 
 
 def system_actor() -> Actor:

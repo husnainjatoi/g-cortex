@@ -58,6 +58,13 @@ class UserCreate(BaseModel):
     role: str
     scopes: list[str] = []
     password: str | None = Field(default=None, max_length=200)
+    date_of_birth: str | None = None
+    use_initial_password: bool = True
+    deposit_received: bool = True
+
+
+class DobBody(BaseModel):
+    date_of_birth: str
 
 
 class UserPatch(BaseModel):
@@ -140,13 +147,24 @@ def users(role: str | None = None, q: str | None = None, actor: Actor = Depends(
 
 @router.post("/users")
 def create_user(body: UserCreate, actor: Actor = Depends(current_actor)):
-    return auth.create_user(actor, user_id=body.user_id, full_name=body.full_name, email=body.email, role=body.role,
-                            password=body.password, scopes=body.scopes, must_change=True)
+    return auth.create_user(actor, user_id=body.user_id, full_name=body.full_name, email=body.email, role=body.role, password=body.password, scopes=body.scopes,
+                            must_change=True, date_of_birth=body.date_of_birth, deposit_received=body.deposit_received, use_initial_password=body.use_initial_password)
 
 
 @router.put("/users/{user_id}")
 def update_user(user_id: str, body: UserPatch, actor: Actor = Depends(current_actor)):
     return auth.update_user(actor, user_id, **body.model_dump(exclude_unset=True))
+
+
+@router.put("/users/{user_id}/dob")
+def set_dob(user_id: str, body: DobBody, actor: Actor = Depends(current_actor)):
+    auth.set_date_of_birth(actor, user_id, body.date_of_birth)
+    return {"ok": True}
+
+
+@router.post("/users/{user_id}/reset-initial-password")
+def reset_initial(user_id: str, actor: Actor = Depends(current_actor)):
+    return auth.provision_initial_password(actor, user_id)
 
 
 @router.post("/users/{user_id}/password")

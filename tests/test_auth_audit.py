@@ -33,7 +33,7 @@ def test_user_without_password_cannot_login(actors):
     with pytest.raises(Unauthenticated):
         auth.login("new1@giki.edu.pk", "anything123")
     with db.tx() as cur:
-        cur.execute("DELETE FROM student_profiles WHERE user_id='NEWST1'"); cur.execute("DELETE FROM users WHERE user_id='NEWST1'")
+        cur.execute("DELETE FROM mess_deposit_accounts WHERE user_id='NEWST1'"); cur.execute("DELETE FROM student_profiles WHERE user_id='NEWST1'"); cur.execute("DELETE FROM users WHERE user_id='NEWST1'")
 
 
 def test_logout_and_deactivation_revoke_sessions(actors):
@@ -61,10 +61,11 @@ def test_password_policy_and_hash_storage(actors):
 def test_change_password_revokes_other_sessions(actors):
     token, actor, _ = auth.login("u2024405@giki.edu.pk", PASSWORD)
     with pytest.raises(Forbidden):
-        auth.change_password(actor, "wrong-current1", "Brand-new-pass-9")
-    auth.change_password(actor, PASSWORD, "Brand-new-pass-9")
+        auth.change_password(actor, "wrong-current1", "Brand-new-pass-9", "Brand-new-pass-9")
+    new_token = auth.change_password(actor, PASSWORD, "Brand-new-pass-9", "Brand-new-pass-9")
     with pytest.raises(Unauthenticated):
         auth.authenticate(token)
+    assert auth.authenticate(new_token).user_id == "2024405"                          # fresh session issued (rotation)
     auth.login("u2024405@giki.edu.pk", "Brand-new-pass-9")
     auth.set_password(None, "2024405", PASSWORD, must_change=False)
 
