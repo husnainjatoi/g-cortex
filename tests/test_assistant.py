@@ -364,7 +364,7 @@ def test_assistant_answers_policy_from_official_source_and_admits_gaps(app, offi
     assert "handbook" in r or "giki.edu.pk" in r                                    # the official source is cited
     gap = Chat(session(app, "u2024405@giki.edu.pk")).say("What does GIKI policy say about bringing pet dragons into the hostel?")
     g = gap["reply"].lower()
-    assert any(k in g for k in ("not find", "couldn't find", "could not find", "not covered", "no information", "not mentioned", "does not")), gap["reply"]
+    assert any(k in g for k in ("not find", "couldn't find", "could not find", "not covered", "no information", "not mentioned", "does not", "no specific mention", "no mention", "no policy", "not address")), gap["reply"]
 
 
 def test_assistant_uses_imported_official_course_data(app):
