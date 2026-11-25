@@ -46,7 +46,7 @@ DISCLAIMER = ("This is an estimated mess bill calculated using the total food ex
 
 def test_estimate_is_total_food_expenditure_divided_by_students_using_the_mess(actors, at):
     adm = actors["mess"]
-    billing.add_expense(adm, "2026-11", 2_000_000, "vegetables and meat"); billing.add_expense(adm, "2026-11", 1_000_000, "rice, flour, oil")
+    billing.add_expense(adm, "2026-11", 3_000_000, "total November food expenditure")
     billing.add_expense(adm, "2026-10", 9_999_999, "previous month - must not leak into November")
     for uid in ("2024405", "2024668", "2024662"):
         eat(uid, NOV.replace(day=2), "lunch")
@@ -386,3 +386,22 @@ def test_admin_dues_summary_and_reports(actors, at):
     assert "billing" in rep["mess"] and "rebates" not in rep["mess"]
     dash = reports.student_dashboard(actors["s1"])
     assert "rebate_pkr" not in dash["mess"] and dash["mess"]["bill"]["outstanding_total_pkr"] == 360.0
+
+
+def test_expenditure_is_one_record_per_month_and_corrections_keep_history(actors, at):
+    adm = actors["mess"]
+    billing.add_expense(adm, "2026-11", 1000, "food")
+    with pytest.raises(Conflict) as e:
+        billing.add_expense(adm, "2026-11", 2000, "duplicate")
+    assert e.value.code == "expense_exists"
+    with pytest.raises(ValidationFailed):
+        billing.correct_expense(adm, "2026-11", 1500, "x")                                   # a real reason is mandatory
+    with pytest.raises(Forbidden):
+        billing.correct_expense(actors["s1"], "2026-11", 1500, "student must not do this")
+    r = billing.correct_expense(adm, "2026-11", 1500, "Invoice from supplier corrected")
+    assert r["total_food_expenditure_pkr"] == 1500
+    rows = billing.list_expenses(adm, "2026-11")
+    assert sorted(x["status"] for x in rows) == ["active", "superseded"] and {x["amount_pkr"] for x in rows} == {1000, 1500}
+    assert db.query_one("SELECT COUNT(*) AS n FROM audit_log WHERE action='mess.expense_correct' AND outcome='success' AND detail::text LIKE %s", ("%supplier corrected%",))["n"] >= 1
+    ov = {m["month"]: m for m in billing.monthly_overview(adm)}["2026-11"]
+    assert ov["status"] == "recorded" and ov["revisions"] == 1 and ov["recorded_by"] == "Mess Office"

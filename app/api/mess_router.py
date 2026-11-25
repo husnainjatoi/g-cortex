@@ -338,3 +338,18 @@ def add_expense(body: ExpenseBody, actor: Actor = Depends(current_actor)):
 def cost_summary(month: str | None = None, actor: Actor = Depends(current_actor)):
     actor.require_scope("mess")
     return billing.month_cost_summary(actor, month)
+
+
+class ExpenseCorrection(BaseModel):
+    amount_pkr: float = Field(gt=0, le=10000000000)
+    reason: str = Field(min_length=5, max_length=300)
+
+
+@router.put("/admin/expenses/{month}")
+def correct_expense(month: str, body: ExpenseCorrection, actor: Actor = Depends(current_actor)):
+    return billing.correct_expense(actor, month, body.amount_pkr, body.reason)
+
+
+@router.get("/admin/expenses-overview")
+def expenses_overview(actor: Actor = Depends(current_actor)):
+    return billing.monthly_overview(actor)

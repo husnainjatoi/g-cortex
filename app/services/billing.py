@@ -177,13 +177,13 @@ ESTIMATE_DISCLAIMER = ("This is an estimated mess bill calculated using the tota
 
 def _cost_share(cur, ms: datetime.date) -> dict:
     """Shared-cost figures for ONE billing period: total food expenditure and the number of DISTINCT students with verified meals in that same period."""
-    cur.execute("SELECT COALESCE(SUM(amount_pkr),0) AS total, COUNT(*) AS lines FROM mess_expenses WHERE period=%s", (ms,))
+    cur.execute("SELECT COALESCE(SUM(amount_pkr),0) AS total, COUNT(*) AS lines, MAX(recorded_at) AS updated_at FROM mess_expenses WHERE period=%s AND status='active'", (ms,))
     e = cur.fetchone()
     cur.execute("""SELECT COUNT(DISTINCT user_id) AS n FROM mess_ledger WHERE status='consumed' AND meal_date BETWEEN %s AND %s""", (ms, _month_end(ms)))
     users = cur.fetchone()["n"]
     total = _d(e["total"])
     share = (total / users).quantize(Q) if (e["lines"] and users) else None
-    return {"total_expenditure": total, "expense_entries": e["lines"], "students_using": users, "per_student": share}
+    return {"total_expenditure": total, "expense_entries": e["lines"], "students_using": users, "per_student": share, "updated_at": e["updated_at"]}
 
 
 def month_cost_summary(actor: Actor, month: str | None = None) -> dict:
@@ -191,7 +191,7 @@ def month_cost_summary(actor: Actor, month: str | None = None) -> dict:
     with db.tx() as cur:
         c = _cost_share(cur, ms)
     return {"month": ms.strftime("%Y-%m"), "total_food_expenditure_pkr": float(c["total_expenditure"]), "students_using_mess": c["students_using"],
-            "estimated_per_student_pkr": float(c["per_student"]) if c["per_student"] is not None else None, "expense_entries": c["expense_entries"], "disclaimer": ESTIMATE_DISCLAIMER}
+            "estimated_per_student_pkr": float(c["per_student"]) if c["per_student"] is not None else None, "expense_entries": c["expense_entries"], "expenditure_updated_at": c["updated_at"], "disclaimer": ESTIMATE_DISCLAIMER}
 
 
 def estimate_bill(actor: Actor, student_id: str | None = None, month: str | None = None) -> dict:
@@ -210,7 +210,7 @@ def estimate_bill(actor: Actor, student_id: str | None = None, month: str | None
         out = {"student_id": sid, "month": ms.strftime("%Y-%m"), "billing_period": {"month": ms.strftime("%Y-%m"), "start": str(ms), "end": str(_month_end(ms))},
                "billing_mode": mode, "days_consumed": days, "meals": counts, "outstanding_total_pkr": _outstanding_total(cur, sid), "disclaimer": ESTIMATE_DISCLAIMER,
                "total_food_expenditure_pkr": float(cost["total_expenditure"]), "students_using_mess": cost["students_using"], "estimated_per_student_pkr": float(cost["per_student"]) if cost["per_student"] is not None else None,
-               "expense_entries": cost["expense_entries"], "lines": [],
+               "expense_entries": cost["expense_entries"], "expenditure_updated_at": cost["updated_at"], "lines": [],
                "previous_invoice": ({k: prev[k] for k in ("invoice_no", "billing_month_label", "total_pkr", "balance_pkr", "status", "due_date")} if prev else None)}
         if inv:
             out.update(kind="finalized", amount_pkr=inv["total_pkr"], invoice=inv, lines=inv["lines"],
@@ -790,23 +790,84 @@ def ensure_all_student_deposits(paid: bool = True) -> int:
 
 @op("mess.expense_add", "expense", "month")
 def add_expense(actor: Actor, month: str, amount_pkr: float, description: str = "", category: str = "food") -> dict:
+    """Record the TOTAL food expenditure of a billing month. Exactly one active record per month; use correct_expense to change it."""
     actor.require_scope("mess")
     ms = month_start(month)
+    amt = _valid_amount(amount_pkr)
+    with db.tx() as cur:
+        _require_open_period(cur, ms)
+        cur.execute("SELECT expense_id FROM mess_expenses WHERE period=%s AND status='active'", (ms,))
+        if cur.fetchone():
+            raise Conflict(f"Food expenditure for {ms:%B %Y} has already been recorded. Use a correction (with a reason) to change it; the earlier figure is kept in the history.", code="expense_exists")
+        cur.execute("INSERT INTO mess_expenses (period, category, description, amount_pkr, recorded_by) VALUES (%s,%s,%s,%s,%s) RETURNING expense_id",
+                    (ms, (category or "food")[:60], (description or "")[:200] or None, amt, actor.user_id))
+        eid = cur.fetchone()["expense_id"]
+        audit.log(cur, actor, "mess.expense_add", "expense", eid, detail={"month": str(ms), "amount_pkr": str(amt), "description": description})
+    return month_cost_summary(actor, ms.strftime("%Y-%m"))
+
+
+def _valid_amount(amount_pkr):
     try:
         amt = _d(amount_pkr)
     except Exception:
         raise ValidationFailed("Please enter the amount as a number.")
     if amt <= 0 or amt > 10_000_000_000:
         raise ValidationFailed("Please enter an expenditure amount greater than zero.")
+    return amt
+
+
+def _require_open_period(cur, ms):
+    cur.execute("SELECT 1 FROM mess_invoices WHERE billing_month=%s LIMIT 1", (ms,))
+    if cur.fetchone():
+        raise RuleViolation(f"Invoices for {ms:%Y-%m} are already finalized, so its food expenditure can no longer be changed.", code="period_closed")
+
+
+@op("mess.expense_correct", "expense", "month")
+def correct_expense(actor: Actor, month: str, amount_pkr: float, reason: str) -> dict:
+    """Authorised correction: the active record is kept as 'superseded' and a new active one (with the reason and the correcting user) replaces it."""
+    actor.require_scope("mess")
+    ms = month_start(month)
+    amt = _valid_amount(amount_pkr)
+    reason = (reason or "").strip()
+    if len(reason) < 5:
+        raise ValidationFailed("Please explain the reason for the correction (at least 5 characters).")
     with db.tx() as cur:
-        cur.execute("SELECT 1 FROM mess_invoices WHERE billing_month=%s LIMIT 1", (ms,))
-        if cur.fetchone():
-            raise RuleViolation(f"Invoices for {ms:%Y-%m} are already finalized, so its food expenditure can no longer be changed.", code="period_closed")
-        cur.execute("INSERT INTO mess_expenses (period, category, description, amount_pkr, recorded_by) VALUES (%s,%s,%s,%s,%s) RETURNING expense_id",
-                    (ms, (category or "food")[:60], (description or "")[:200] or None, amt, actor.user_id))
+        _require_open_period(cur, ms)
+        cur.execute("SELECT * FROM mess_expenses WHERE period=%s AND status='active' FOR UPDATE", (ms,))
+        old = cur.fetchone()
+        if not old:
+            raise NotFound(f"No food expenditure has been recorded for {ms:%B %Y} yet, so there is nothing to correct.")
+        if old["amount_pkr"] == amt:
+            raise ValidationFailed("The corrected amount is the same as the current record.")
+        cur.execute("UPDATE mess_expenses SET status='superseded' WHERE expense_id=%s", (old["expense_id"],))
+        cur.execute("""INSERT INTO mess_expenses (period, category, description, amount_pkr, recorded_by, supersedes_id, correction_reason) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING expense_id""",
+                    (ms, old["category"], old["description"], amt, actor.user_id, old["expense_id"], reason[:300]))
         eid = cur.fetchone()["expense_id"]
-        audit.log(cur, actor, "mess.expense_add", "expense", eid, detail={"month": str(ms), "amount_pkr": str(amt), "description": description})
+        audit.log(cur, actor, "mess.expense_correct", "expense", eid, detail={"month": str(ms), "old_amount_pkr": str(old["amount_pkr"]), "new_amount_pkr": str(amt), "reason": reason})
     return month_cost_summary(actor, ms.strftime("%Y-%m"))
+
+
+def monthly_overview(actor: Actor, months: int = 12) -> list[dict]:
+    """One row per recent month: recorded total, verified distinct users (computed by the backend), per-student estimate, record status and who recorded it."""
+    actor.require_scope("mess")
+    today = clock.today().replace(day=1)
+    out = []
+    with db.tx() as cur:
+        for i in range(months):
+            y, m = divmod(today.year * 12 + today.month - 1 - i, 12)
+            ms = datetime.date(y, m + 1, 1)
+            c = _cost_share(cur, ms)
+            cur.execute("""SELECT e.expense_id, e.recorded_at, e.description, e.correction_reason, u.full_name AS recorded_by_name, e.recorded_by,
+                                  (SELECT COUNT(*) FROM mess_expenses x WHERE x.period=e.period AND x.status='superseded') AS revisions
+                           FROM mess_expenses e LEFT JOIN users u ON u.user_id=e.recorded_by WHERE e.period=%s AND e.status='active'""", (ms,))
+            rec = cur.fetchone()
+            cur.execute("SELECT COUNT(*) AS n FROM mess_invoices WHERE billing_month=%s", (ms,))
+            invoiced = cur.fetchone()["n"]
+            out.append({"month": ms.strftime("%Y-%m"), "label": ms.strftime("%B %Y"), "total_food_expenditure_pkr": float(c["total_expenditure"]) if rec else None, "students_using_mess": c["students_using"],
+                        "estimated_per_student_pkr": float(c["per_student"]) if c["per_student"] is not None else None, "recorded": bool(rec),
+                        "status": "finalized" if invoiced else ("recorded" if rec else "not recorded"), "invoices": invoiced, "recorded_by": rec and rec["recorded_by_name"], "recorded_at": rec and rec["recorded_at"],
+                        "revisions": rec["revisions"] if rec else 0, "description": rec and rec["description"], "correction_reason": rec and rec["correction_reason"]})
+    return out
 
 
 def list_expenses(actor: Actor, month: str | None = None) -> list[dict]:

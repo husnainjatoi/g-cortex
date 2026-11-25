@@ -142,6 +142,16 @@ def test_billing_flow_over_http(app):
         cur.execute("INSERT INTO mess_ledger (user_id, meal_date, meal_type, status, source) VALUES ('2024405', %s, 'lunch', 'consumed', 'turnstile'), ('2024405', %s, 'dinner', 'consumed', 'turnstile')", (first, first))
     assert adm.post("/api/mess/admin/expenses", json={"month": first.strftime("%Y-%m"), "amount_pkr": 4000, "description": "groceries"}).status_code == 200
     assert stu.post("/api/mess/admin/expenses", json={"month": first.strftime("%Y-%m"), "amount_pkr": 1}).status_code == 403
+    m = first.strftime("%Y-%m")
+    assert adm.post("/api/mess/admin/expenses", json={"month": m, "amount_pkr": 5}).status_code == 409                       # one record per month
+    assert stu.put(f"/api/mess/admin/expenses/{m}", json={"amount_pkr": 1, "reason": "student tries"}).status_code == 403
+    assert stu.get("/api/mess/admin/expenses-overview").status_code == 403
+    assert adm.put(f"/api/mess/admin/expenses/{m}", json={"amount_pkr": 4000.5, "reason": "x"}).status_code == 422             # reason required
+    assert adm.put(f"/api/mess/admin/expenses/{m}", json={"amount_pkr": 4000, "reason": "same"}).status_code == 422
+    assert adm.put(f"/api/mess/admin/expenses/{m}", json={"amount_pkr": 5000, "reason": "supplier invoice corrected"}).status_code == 200
+    assert adm.put(f"/api/mess/admin/expenses/{m}", json={"amount_pkr": 4000, "reason": "restore original figure"}).status_code == 200
+    ov = {r["month"]: r for r in adm.get("/api/mess/admin/expenses-overview").json()}[m]
+    assert ov["students_using_mess"] == 1 and ov["estimated_per_student_pkr"] == 4000 and ov["revisions"] == 2
     bill = stu.get("/api/mess/me/bill").json()
     assert bill["kind"] == "estimate" and bill["amount_pkr"] == 4000 and bill["students_using_mess"] == 1 and bill["days_consumed"] == 1
     assert "estimated mess bill" in bill["disclaimer"]
