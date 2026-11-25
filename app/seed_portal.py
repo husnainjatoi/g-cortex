@@ -45,9 +45,15 @@ def seed() -> None:
             for code, grade in HISTORY[uid]:
                 cur.execute("INSERT INTO course_history (user_id, course_code, grade, term) VALUES (%s,%s,%s,'Previous') ON CONFLICT DO NOTHING", (uid, code, grade))
             cur.execute("UPDATE student_profiles SET interests=%s, current_semester=%s WHERE user_id=%s AND interests=''", (INTERESTS[uid], SEMESTER[uid], uid))
+        # team-seeded societies (campus_societies) become legacy rows of the master societies table; official ones are imported by app.services.societies
+        cur.execute("""INSERT INTO societies (name, name_key, category, origin, advisor_id)
+                       SELECT society_name, lower(regexp_replace(society_name, '[^a-zA-Z0-9]+', '', 'g')), category, 'legacy', advisor_id FROM campus_societies ON CONFLICT (name_key) DO NOTHING""")
         for soc, uid, role in MEMBERS:
-            cur.execute("INSERT INTO society_members (society_name, user_id, member_role) SELECT %s,%s,%s WHERE EXISTS (SELECT 1 FROM campus_societies WHERE society_name=%s) AND EXISTS (SELECT 1 FROM users WHERE user_id=%s) ON CONFLICT DO NOTHING",
-                        (soc, uid, role, soc, uid))
+            cur.execute("""INSERT INTO society_memberships (society_id, user_id, member_role)
+                           SELECT s.society_id, %s, %s FROM societies s WHERE s.name_key = lower(regexp_replace(%s, '[^a-zA-Z0-9]+', '', 'g'))
+                           AND EXISTS (SELECT 1 FROM users WHERE user_id=%s) ON CONFLICT DO NOTHING""", (uid, role, soc, uid))
+    from app.services import billing
+    billing.ensure_all_student_deposits(paid=True)
 
 
 if __name__ == "__main__":

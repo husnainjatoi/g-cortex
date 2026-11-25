@@ -52,6 +52,13 @@ def database():
 
 
 @pytest.fixture(autouse=True)
+def fresh_state_limits():
+    from app.api import auth_router
+    auth_router._attempts.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def fresh_clock():
     from app.services import clock
     clock.freeze(None)
@@ -85,7 +92,7 @@ def reset_state():
     with db.tx() as cur:
         cur.execute("""TRUNCATE enrollments, mess_out_requests, mess_qr_redemptions, notifications, domain_events, bookings,
                        society_requisitions, equipment_custody_log, assistant_pending_actions, mess_ledger, event_handler_runs,
-                       mess_payments, mess_challans, mess_invoice_adjustments, mess_invoices, mess_deposit_transactions, mess_deposit_accounts, mess_clearances, mess_rates RESTART IDENTITY CASCADE""")
+                       mess_payments, mess_challans, mess_invoice_adjustments, mess_invoices, mess_deposit_transactions, mess_deposit_accounts, mess_clearances, mess_rates, mess_expenses RESTART IDENTITY CASCADE""")
         cur.execute("DELETE FROM mess_rebates")
         cur.execute("DELETE FROM gate_passes")
         cur.execute("UPDATE no_show_records SET strikes=0, suspended=false, suspended_until=NULL, strike_history='[]'")
@@ -98,8 +105,11 @@ def reset_state():
         cur.execute("UPDATE courses SET is_active=true, capacity=60 WHERE course_code NOT IN ('CS330','CS412')")
         cur.execute("UPDATE student_profiles SET allergies='none'")
         cur.execute("UPDATE system_settings SET value='per_meal' WHERE key='mess_billing_mode'")
-        cur.execute("UPDATE system_settings SET value='0' WHERE key='mess_deposit_amount'")
+        cur.execute("UPDATE system_settings SET value='15000' WHERE key='mess_deposit_amount'")
+        cur.execute("UPDATE users SET must_change_password=false WHERE user_id IN ('2024405','2024668','2024662','FAC001','FAC002','ADMIN01','ADMACAD','ADMMESS','ADMREQ')")
         cur.execute("DELETE FROM mess_totp_secrets")
+    from app.services import billing
+    billing.ensure_all_student_deposits(paid=True)
     yield
 
 
