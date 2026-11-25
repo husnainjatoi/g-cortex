@@ -36,6 +36,13 @@ def list_venues(actor: Actor, category: str | None = None, q: str | None = None,
     return db.query(f"SELECT * FROM venues {('WHERE ' + ' AND '.join(where)) if where else ''} ORDER BY category, venue_id", params)
 
 
+def get_venue(actor: Actor, venue_id: str) -> dict:
+    v = db.query_one("SELECT * FROM venues WHERE venue_id=%s AND is_active", ((venue_id or "").upper().strip(),))
+    if not v:
+        raise NotFound("That venue does not exist or is no longer available.")
+    return v
+
+
 def venue_availability(actor: Actor, venue_id: str, date: str) -> dict:
     d = clock.parse_date(date, "date")
     v = db.query_one("SELECT * FROM venues WHERE venue_id=%s", ((venue_id or "").upper(),))
@@ -107,13 +114,18 @@ _INTENT = [
 
 
 def recommend_venue(actor: Actor, description: str, attendees: int, facilities: str = "", date: str | None = None,
-                    start_time: str | None = None, duration_hours: float = 2.0) -> dict:
+                    start_time: str | None = None, duration_hours: float = 2.0, venue_type: str = "") -> dict:
+    if len((description or "").strip()) < 3:
+        raise ValidationFailed("Please enter a description containing at least 3 characters.")
     try:
         attendees = int(attendees)
     except (TypeError, ValueError):
-        raise ValidationFailed("Expected attendees must be a number.")
-    if attendees < 1:
-        raise ValidationFailed("Expected attendees must be at least 1.")
+        raise ValidationFailed("Please enter the number of participants as a whole number.")
+    if attendees < 1 or attendees > 10000:
+        raise ValidationFailed("Please enter a number of participants between 1 and 10,000.")
+    if (date and not start_time) or (start_time and not date):
+        raise ValidationFailed("To check availability please enter both a date and a start time (or leave both empty).")
+    venue_type = (venue_type or "").strip().lower()
     desc = (description or "").lower()
     wants = [f.strip().lower().replace(" ", "_") for f in re.split(r"[,;]", facilities or "") if f.strip()]
     for kw in ("projector", "stage", "microphone", "mic", "sound", "air_conditioning", "ac", "video_conferencing"):
@@ -124,7 +136,7 @@ def recommend_venue(actor: Actor, description: str, attendees: int, facilities: 
         s = datetime.datetime.combine(clock.parse_date(date, "date"), clock.parse_time(start_time, "start time"))
         window = (s, s + datetime.timedelta(hours=float(duration_hours)))
     scored, excluded = [], []
-    for v in db.query("SELECT * FROM venues WHERE is_active AND category <> 'sports'"):
+    for v in db.query("SELECT * FROM venues WHERE is_active AND category <> 'sports'" + (" AND category = %s" if venue_type else ""), ((venue_type,) if venue_type else ())):
         cap = v["capacity"] or 0
         if cap < attendees:
             excluded.append({"venue_id": v["venue_id"], "reason": f"capacity {cap} < {attendees}"}); continue
@@ -144,23 +156,26 @@ def recommend_venue(actor: Actor, description: str, attendees: int, facilities: 
         matched = sorted({h for w in wants for h in have if w in h or h in w})
         if matched:
             score += 10 * len(matched); reasons.append("has " + ", ".join(matched))
-        scored.append({"venue_id": v["venue_id"], "name": v["name"], "capacity": cap, "requires_approval": v["requires_approval"],
-                       "facilities": have, "match_score": min(score, 100), "reasons": reasons, "available_in_window": free if window else None})
+        scored.append({"venue_id": v["venue_id"], "name": v["name"], "category": v["category"], "description": v["description"], "capacity": cap, "requires_approval": v["requires_approval"],
+                       "facilities": have, "matched_facilities": matched, "match_score": min(score, 100), "reasons": reasons, "available_in_window": free if window else None,
+                       "availability": ("Available at the requested time" if free else None) if window else "Select a date and time to check availability",
+                       "suitability": f"{min(score, 100)}% match - " + "; ".join(reasons)})
     scored.sort(key=lambda x: (-x["match_score"], x["capacity"]))
-    return {"query": description, "attendees": attendees, "recommendations": scored[:3], "excluded": excluded,
+    return {"query": description, "attendees": attendees, "venue_type": venue_type or None, "recommendations": scored[:5], "excluded": excluded,
             "guidance": (f"Best match: {scored[0]['name']} ({scored[0]['match_score']}% match)." if scored
-                         else "No active venue can host that many attendees on the requested slot.")}
+                         else "No venue matches all your requirements. Try fewer participants, a different venue type or another time.")}
 
 
 # ── Society requisitions with multi-tier approval ───────────
 
 def list_societies(actor: Actor) -> list[dict]:
-    return db.query("SELECT society_name, advisor_name, category FROM campus_societies ORDER BY society_name")
+    from . import societies
+    return societies.list_societies(actor)
 
 
 def my_societies(actor: Actor) -> list[dict]:
-    return db.query("""SELECT s.society_name, s.advisor_name, s.category, m.member_role FROM society_members m
-                       JOIN campus_societies s USING (society_name) WHERE m.user_id=%s ORDER BY 1""", (actor.user_id,))
+    from . import societies
+    return societies.my_societies(actor)
 
 
 def _stages(chain: list[dict], status: str) -> list[dict]:
@@ -184,71 +199,98 @@ def _fmt(r: dict) -> dict:
 
 
 @op("requisition.submit", "requisition", None)
-def submit_requisition(actor: Actor, society_name: str, venue_id: str, event_title: str, booking_date: str, start_time: str,
-                       duration_hours: float, expected_attendees: int, justification: str = "", dry_run: bool = False) -> dict:
+def submit_requisition(actor: Actor, venue_id: str, event_title: str, booking_date: str, start_time: str, duration_hours: float, expected_attendees: int,
+                       justification: str = "", reservation_type: str = "society", society_id: int | None = None, society_name: str | None = None,
+                       description: str = "", dry_run: bool = False) -> dict:
+    """One reservation service for individuals AND societies, used by the web form and the assistant alike.
+
+    * individual: submitted under the student's own account; goes to Student Affairs for approval.
+    * society: on behalf of a society; the requester must be a recorded member/office-bearer when membership data exists. Without membership data
+      the request is NOT auto-trusted: it is flagged `authority_verified = false` and an administrator must confirm it. If the society has a faculty
+      advisor the advisor is the first approver, then Student Affairs.
+    Both types share the same venue, capacity, notice, overlap and open-request-quota checks.
+    """
     actor.require_role("student")
+    reservation_type = (reservation_type or "").lower().strip()
+    if reservation_type not in ("individual", "society"):
+        raise ValidationFailed("Please choose whether this is an individual or a society reservation.")
     d, t = clock.parse_date(booking_date, "Event date"), clock.parse_time(start_time, "Start time")
     try:
         dur, att = float(duration_hours), int(expected_attendees)
     except (TypeError, ValueError):
-        raise ValidationFailed("Duration and attendees must be numbers.")
+        raise ValidationFailed("Please enter the duration and the number of participants as numbers.")
     if not (event_title or "").strip() or len(event_title) > 150:
-        raise ValidationFailed("Event title is required (max 150 characters).")
+        raise ValidationFailed("Please enter an event title (up to 150 characters).")
     if att < 1:
-        raise ValidationFailed("Expected attendees must be at least 1.")
+        raise ValidationFailed("Please enter at least 1 expected participant.")
     with db.tx() as cur:
         max_h, notice, max_open = (settings.get(cur, k) for k in ("requisition_max_hours", "requisition_notice_days", "requisition_max_pending"))
         if not 0.5 <= dur <= max_h:
-            raise ValidationFailed(f"Event duration must be between 0.5 and {max_h} hours.")
+            raise ValidationFailed(f"The duration must be between 0.5 and {max_h} hours.")
         if d < clock.today() + datetime.timedelta(days=notice):
-            raise RuleViolation(f"Requisitions need at least {notice} day(s) notice (earliest date {clock.today() + datetime.timedelta(days=notice)}).")
+            raise RuleViolation(f"Reservations need at least {notice} day(s) notice (earliest date {clock.today() + datetime.timedelta(days=notice)}).")
         start_dt = datetime.datetime.combine(d, t)
         end_dt = start_dt + datetime.timedelta(hours=dur)
         if end_dt.date() != d or t < datetime.time(7, 0):
             raise ValidationFailed("Events must start after 07:00 and end before midnight.")
-        cur.execute("SELECT * FROM campus_societies WHERE society_name=%s", (society_name,))
-        soc = cur.fetchone()
-        if not soc:
-            raise NotFound(f"Society '{society_name}' is not registered.")
-        cur.execute("SELECT 1 FROM society_members WHERE society_name=%s AND user_id=%s", (soc["society_name"], actor.user_id))
-        if not cur.fetchone():
-            raise Forbidden(f"You are not a registered member of {soc['society_name']}.")
+        soc, authority_verified, advisor_id, advisor_name = None, True, None, None
+        if reservation_type == "society":
+            from . import societies
+            soc = societies.resolve(cur, society_id, society_name)
+            if soc["status"] != "active":
+                raise RuleViolation(f"{soc['name']} is not an active society, so it cannot be used for a reservation.")
+            cur.execute("SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE user_id=%s) AS me FROM society_memberships WHERE society_id=%s", (actor.user_id, soc["society_id"]))
+            m = cur.fetchone()
+            if m["n"] > 0 and m["me"] == 0:
+                raise Forbidden(f"You are not recorded as a member or representative of {soc['name']}, so you cannot reserve a venue on its behalf.")
+            authority_verified = m["n"] > 0
+            advisor_id = soc["advisor_id"]
+            if advisor_id:
+                cur.execute("SELECT full_name FROM users WHERE user_id=%s", (advisor_id,))
+                advisor_name = (cur.fetchone() or {}).get("full_name")
         cur.execute("SELECT * FROM venues WHERE venue_id=%s", ((venue_id or "").upper(),))
         v = cur.fetchone()
         if not v or not v["is_active"]:
             raise NotFound("That venue does not exist or is not available.")
         if v["category"] == "sports":
-            raise RuleViolation("Sports facilities are reserved through Sports Booking, not society requisitions.")
+            raise RuleViolation("Sports facilities are reserved through Sports Booking, not venue reservations.")
         if att > v["capacity"]:
             raise RuleViolation(f"{v['name']} holds at most {v['capacity']} people; {att} were requested.", code="capacity_exceeded")
         cur.execute("SELECT COUNT(*) AS n FROM society_requisitions WHERE applicant_id=%s AND status IN ('pending_advisor_approval','pending_admin_approval')", (actor.user_id,))
         if cur.fetchone()["n"] >= max_open:
-            raise RuleViolation(f"You already have {max_open} open requisitions awaiting approval.")
+            raise RuleViolation(f"You already have {max_open} reservations awaiting approval. Please wait for a decision before submitting more.")
         cur.execute("""SELECT 1 FROM bookings WHERE venue_id=%s AND status IN ('approved','pending','checked_in')
                        AND tsrange(start_ts,end_ts) && tsrange(%s,%s)""", (v["venue_id"], start_dt, end_dt))
         if cur.fetchone():
             raise RuleViolation(f"{v['name']} is already reserved during {t.strftime('%H:%M')}-{end_dt.strftime('%H:%M')} on {d}.", code="venue_conflict")
+        first_approver = advisor_name if (soc and advisor_id) else "Directorate of Student Affairs"
         if dry_run:
-            return {"ok": True, "dry_run": True, "society": soc["society_name"], "venue": v["name"], "date": str(d), "start_time": t.strftime("%H:%M"),
-                    "end_time": end_dt.strftime("%H:%M"), "attendees": att, "first_approver": soc["advisor_name"]}
+            return {"ok": True, "dry_run": True, "reservation_type": reservation_type, "society": soc["name"] if soc else None, "venue": v["name"], "date": str(d),
+                    "start_time": t.strftime("%H:%M"), "end_time": end_dt.strftime("%H:%M"), "attendees": att, "first_approver": first_approver, "authority_verified": authority_verified}
         cur.execute("SELECT nextval('requisition_seq') AS n")
         rid = f"REQ-{d.year}-{cur.fetchone()['n']}"
-        chain = [{"tier": 1, "role": "faculty_advisor", "assigned_to": soc["advisor_id"], "advisor_name": soc["advisor_name"], "action": "pending", "timestamp": None, "comments": None},
-                 {"tier": 2, "role": "student_affairs_admin", "assigned_to": None, "advisor_name": None, "action": "pending", "timestamp": None, "comments": None}]
-        cur.execute("""INSERT INTO society_requisitions (requisition_id, society_name, venue_id, applicant_id, event_title, booking_date, start_time,
-                       duration_hours, expected_attendees, justification, current_tier, status, approval_chain)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,'pending_advisor_approval',%s)""",
-                    (rid, soc["society_name"], v["venue_id"], actor.user_id, event_title.strip(), d, t.strftime("%H:%M"), dur, att, justification, json.dumps(chain)))
-        audit.log(cur, actor, "requisition.submit", "requisition", rid, detail={"venue": v["venue_id"], "date": str(d), "society": soc["society_name"]})
-        events.emit(cur, REQUISITION_SUBMITTED, {"requisition_id": rid, "applicant_id": actor.user_id, "advisor_id": soc["advisor_id"],
-                                                 "event_title": event_title.strip(), "venue": v["name"]})
-    return {"ok": True, "requisition_id": rid, "status": "pending_advisor_approval", "next_approver": soc["advisor_name"],
-            "message": f"Requisition {rid} submitted and routed to {soc['advisor_name']} (Tier 1: Faculty Advisor)."}
+        chain = []
+        if soc and advisor_id:
+            chain.append({"tier": 1, "role": "faculty_advisor", "assigned_to": advisor_id, "advisor_name": advisor_name, "action": "pending", "timestamp": None, "comments": None})
+        chain.append({"tier": 2, "role": "student_affairs_admin", "assigned_to": None, "advisor_name": None, "action": "pending", "timestamp": None, "comments": None,
+                      **({"note": "Requester authority for this society could not be verified from membership records - administrator must confirm."} if (soc and not authority_verified) else {})})
+        status, tier = ("pending_advisor_approval", 1) if chain[0]["tier"] == 1 else ("pending_admin_approval", 2)
+        cur.execute("""INSERT INTO society_requisitions (requisition_id, society_name, society_id, reservation_type, authority_verified, venue_id, applicant_id, event_title, booking_date, start_time,
+                       duration_hours, expected_attendees, justification, description, current_tier, status, approval_chain)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (rid, soc["name"] if soc else None, soc["society_id"] if soc else None, reservation_type, authority_verified, v["venue_id"], actor.user_id, event_title.strip(), d,
+                     t.strftime("%H:%M"), dur, att, justification, description or None, tier, status, json.dumps(chain)))
+        audit.log(cur, actor, "requisition.submit", "requisition", rid, detail={"venue": v["venue_id"], "date": str(d), "type": reservation_type, "society": soc["name"] if soc else None,
+                                                                              "authority_verified": authority_verified})
+        events.emit(cur, REQUISITION_SUBMITTED, {"requisition_id": rid, "applicant_id": actor.user_id, "advisor_id": advisor_id if (soc and advisor_id) else None,
+                                                 "event_title": event_title.strip(), "venue": v["name"], "reservation_type": reservation_type})
+    return {"ok": True, "requisition_id": rid, "status": status, "reservation_type": reservation_type, "next_approver": first_approver, "authority_verified": authority_verified,
+            "message": f"Reservation request {rid} submitted for {v['name']} ({'society: ' + soc['name'] if soc else 'individual'}). It is now waiting for approval by {first_approver}; the venue is not confirmed until it is approved."}
 
 
 def _load_req(cur, rid: str, lock: bool = False) -> dict:
-    cur.execute("""SELECT r.*, v.name AS venue_name, u.full_name AS applicant_name FROM society_requisitions r
-                   JOIN venues v USING (venue_id) JOIN users u ON u.user_id = r.applicant_id WHERE r.requisition_id=%s""" + (" FOR UPDATE OF r" if lock else ""),
+    cur.execute("""SELECT r.*, v.name AS venue_name, u.full_name AS applicant_name, COALESCE(s.name, r.society_name) AS society_display FROM society_requisitions r
+                   JOIN venues v USING (venue_id) JOIN users u ON u.user_id = r.applicant_id LEFT JOIN societies s ON s.society_id = r.society_id WHERE r.requisition_id=%s""" + (" FOR UPDATE OF r" if lock else ""),
                 ((rid or "").upper().strip(),))
     row = cur.fetchone()
     if not row:
@@ -258,7 +300,7 @@ def _load_req(cur, rid: str, lock: bool = False) -> dict:
 
 def _can_view(actor: Actor, r: dict, chain: list[dict]) -> bool:
     return (actor.user_id == r["applicant_id"] or actor.has_scope("requisition")
-            or (actor.is_faculty and chain and chain[0].get("assigned_to") == actor.user_id))
+            or (actor.is_faculty and chain and chain[0]["tier"] == 1 and chain[0].get("assigned_to") == actor.user_id))
 
 
 def get_requisition(actor: Actor, requisition_id: str) -> dict:
@@ -279,13 +321,13 @@ def list_requisitions(actor: Actor, scope: str = "mine", status: str | None = No
         if not actor.is_faculty and not actor.has_scope("requisition"):
             raise Forbidden("Only faculty advisors can view the advisor queue.")
         if not actor.has_scope("requisition"):
-            where.append("(r.approval_chain::jsonb -> 0 ->> 'assigned_to') = %s"); params.append(actor.user_id)
+            where.append("(r.approval_chain::jsonb -> 0 ->> 'tier') = '1' AND (r.approval_chain::jsonb -> 0 ->> 'assigned_to') = %s"); params.append(actor.user_id)
     else:
         where.append("r.applicant_id=%s"); params.append(actor.user_id)
     if status:
         where.append("r.status=%s"); params.append(status)
-    rows = db.query(f"""SELECT r.*, v.name AS venue_name, u.full_name AS applicant_name FROM society_requisitions r JOIN venues v USING (venue_id)
-                        JOIN users u ON u.user_id=r.applicant_id {('WHERE ' + ' AND '.join(where)) if where else ''}
+    rows = db.query(f"""SELECT r.*, v.name AS venue_name, u.full_name AS applicant_name, COALESCE(s.name, r.society_name) AS society_display FROM society_requisitions r JOIN venues v USING (venue_id)
+                        JOIN users u ON u.user_id=r.applicant_id LEFT JOIN societies s ON s.society_id=r.society_id {('WHERE ' + ' AND '.join(where)) if where else ''}
                         ORDER BY r.created_at DESC LIMIT 300""", params)
     return [_fmt(r) for r in rows]
 
@@ -305,7 +347,7 @@ def review_requisition(actor: Actor, requisition_id: str, action: str, comments:
         if r["status"] in TERMINAL:
             raise RuleViolation(f"Requisition {rid} is already {r['status']}.")
         tier = 1 if r["status"] == "pending_advisor_approval" else 2
-        node = chain[tier - 1]
+        node = next(n for n in chain if n["tier"] == tier)
         if tier == 1:
             if not ((actor.is_faculty and node["assigned_to"] == actor.user_id) or actor.has_scope("requisition")):
                 raise Forbidden("Tier 1 review is restricted to the society's Faculty Advisor (or a Student Affairs administrator).")

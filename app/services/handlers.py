@@ -72,7 +72,9 @@ def clearance_updated(cur, p):
 def requisition_submitted(cur, p):
     notify(cur, p["applicant_id"], "requisition", f"{p['requisition_id']} submitted", f"'{p['event_title']}' at {p['venue']} is with the Faculty Advisor.", "info", "requisitions")
     if p.get("advisor_id"):
-        notify(cur, p["advisor_id"], "requisition", f"Approval needed: {p['requisition_id']}", f"'{p['event_title']}' awaits your Tier-1 review.", "info", "requisitions")
+        notify(cur, p["advisor_id"], "requisition", f"Approval needed: {p['requisition_id']}", f"'{p['event_title']}' awaits your Tier-1 review.", "info", "approvals")
+    else:
+        notify_admins(cur, "requisition", "requisition_admin", f"Approval needed: {p['requisition_id']}", f"{p.get('reservation_type', 'society').capitalize()} reservation '{p['event_title']}' awaits clearance.", "info", "admin/requisitions")
 
 
 @subscribe(requisitions.REQUISITION_ADVANCED)

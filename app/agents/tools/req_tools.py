@@ -1,6 +1,6 @@
 """Requisition & Resource tools - thin adapters over the requisition, sports and equipment services."""
 from app.agents.runtime import context, propose, tool
-from app.services import clock, equipment, requisitions, sports
+from app.services import clock, equipment, requisitions, societies as societies_svc, sports
 
 
 @tool
@@ -80,45 +80,60 @@ def cancel_sports_booking(booking_code: str) -> dict:
 
 
 @tool
-def recommend_venue(event_description: str, expected_attendees: int, required_facilities: str = "") -> dict:
+def recommend_venue(event_description: str, expected_attendees: int, required_facilities: str = "", venue_type: str = "") -> dict:
     """Natural-language venue recommendation for an event.
 
     Args:
         event_description: What the event is (e.g. 'society hackathon with demos').
         expected_attendees: Headcount.
         required_facilities: Optional comma-separated needs (projector, stage, microphone).
+        venue_type: Optional category filter: auditorium, seminar_hall, lab, conference_room, outdoor.
     """
-    return {"ok": True, **requisitions.recommend_venue(context().actor, event_description, expected_attendees, required_facilities)}
+    return {"ok": True, **requisitions.recommend_venue(context().actor, event_description, expected_attendees, required_facilities, venue_type=venue_type)}
+
+
+@tool
+def list_societies(search: str = "") -> dict:
+    """Official GIKI student societies (name, category, short description) that a society reservation can be made for.
+
+    Args:
+        search: Optional text to filter by name or description, e.g. 'IET' or 'computing'.
+    """
+    rows = societies_svc.list_societies(context().actor, q=search or None)
+    return {"ok": True, "count": len(rows), "societies": [{"society_id": r["society_id"], "name": r["name"], "category": r["category"], "description": (r["description"] or "")[:200]} for r in rows]}
 
 
 @tool
 def list_my_societies() -> dict:
-    """Societies you belong to (only these can be used for a requisition)."""
-    return {"ok": True, "societies": requisitions.my_societies(context().actor)}
+    """Societies in which you are a recorded member or office-bearer (the societies you are known to represent)."""
+    return {"ok": True, "societies": societies_svc.my_societies(context().actor)}
 
 
 @tool
-def submit_society_requisition(society_name: str, venue_id: str, event_title: str, booking_date: str, start_time: str,
-                               duration_hours: float, expected_attendees: int, justification: str = "") -> dict:
-    """Submit a society event requisition into the two-tier approval chain (Faculty Advisor -> Student Affairs). Validates
-    membership, capacity, notice and venue conflicts, then asks the user to confirm.
+def submit_venue_reservation(reservation_type: str, venue_id: str, event_title: str, booking_date: str, start_time: str, duration_hours: float,
+                             expected_attendees: int, justification: str = "", society_name: str = "") -> dict:
+    """Request a venue reservation. reservation_type is 'individual' (for the student personally) or 'society' (on behalf of a society,
+    which then requires society_name from list_societies). Runs the SAME backend validation as the website (capacity, notice, conflicts,
+    membership/authority, quotas) and then asks the user to confirm. Nothing is booked until the request is approved by the approval chain.
 
     Args:
-        society_name: Exact society name from list_my_societies.
-        venue_id: e.g. 'SEM_HALL_1'.
-        event_title: Event name.
+        reservation_type: 'individual' or 'society'. Ask the user if it is unclear.
+        venue_id: e.g. 'SEM_HALL_1' (use recommend_venue to find one).
+        event_title: Event or purpose title.
         booking_date: YYYY-MM-DD.
         start_time: HH:MM.
         duration_hours: Hours.
-        expected_attendees: Headcount.
+        expected_attendees: Number of participants.
         justification: Short purpose statement.
+        society_name: Required for society reservations - exact or close name of the society.
     """
-    args = dict(society_name=society_name, venue_id=venue_id, event_title=event_title, booking_date=booking_date, start_time=start_time,
-                duration_hours=float(duration_hours), expected_attendees=int(expected_attendees), justification=justification)
+    args = dict(reservation_type=reservation_type, venue_id=venue_id, event_title=event_title, booking_date=booking_date, start_time=start_time,
+                duration_hours=float(duration_hours), expected_attendees=int(expected_attendees), justification=justification, society_name=society_name or None)
     res = requisitions.submit_requisition(context().actor, **args, dry_run=True)
-    return propose("submit_society_requisition", args,
-                   f"Submit requisition for '{event_title}' ({res['society']}) at {res['venue']} on {res['date']} {res['start_time']}-{res['end_time']} "
-                   f"for {res['attendees']} people. First approver: {res['first_approver']}.")
+    who = f"society {res['society']}" if res["society"] else "yourself (individual reservation)"
+    return propose("submit_venue_reservation", args,
+                   f"Submit a reservation request for {who}: '{event_title}' at {res['venue']} on {res['date']} {res['start_time']}-{res['end_time']} for {res['attendees']} people. "
+                   f"First approver: {res['first_approver']}. It is not confirmed until approved.")
 
 
 @tool
@@ -213,6 +228,6 @@ def return_lab_equipment(barcode: str, condition: str = "good") -> dict:
 
 
 REQ_TOOLS = [get_today, list_sports_facilities, check_sports_availability, get_my_booking_quota, book_sports_facility, get_my_bookings,
-             cancel_sports_booking, recommend_venue, list_my_societies, submit_society_requisition, get_requisition_status,
+             cancel_sports_booking, recommend_venue, list_societies, list_my_societies, submit_venue_reservation, get_requisition_status,
              list_available_equipment, list_unavailable_equipment, lookup_equipment_by_barcode, get_equipment_custody_history,
              get_my_equipment, checkout_lab_equipment, return_lab_equipment]

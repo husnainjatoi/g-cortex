@@ -3,21 +3,24 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from app.api.deps import current_actor
-from app.services import equipment, requisitions, sports
+from app.services import equipment, requisitions, societies as societies_svc, sports
 from app.services.actor import Actor
 
 router = APIRouter()
 
 
 class RequisitionBody(BaseModel):
-    society_name: str = Field(max_length=100)
-    venue_id: str = Field(max_length=20)
+    reservation_type: str = Field(default="society", max_length=12)
+    society_id: int | None = None
+    society_name: str | None = Field(default=None, max_length=200)
+    venue_id: str = Field(min_length=1, max_length=20)
     event_title: str = Field(min_length=1, max_length=150)
-    booking_date: str
-    start_time: str
+    booking_date: str = Field(min_length=8, max_length=10)
+    start_time: str = Field(min_length=3, max_length=8)
     duration_hours: float = Field(gt=0, le=24)
     expected_attendees: int = Field(ge=1, le=10000)
     justification: str = Field(default="", max_length=1000)
+    description: str = Field(default="", max_length=2000)
 
 
 class ReviewBody(BaseModel):
@@ -42,6 +45,7 @@ class CheckinBody(BaseModel):
 
 class RecommendBody(BaseModel):
     description: str = Field(min_length=3, max_length=500)
+    venue_type: str = Field(default="", max_length=50)
     attendees: int = Field(ge=1, le=10000)
     facilities: str = Field(default="", max_length=200)
     date: str | None = None
@@ -81,6 +85,28 @@ class VenuePatch(BaseModel):
     exclusive: bool | None = None
 
 
+class SocietyBody(BaseModel):
+    name: str = Field(min_length=3, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    category: str | None = Field(default=None, max_length=50)
+    advisor_id: str | None = Field(default=None, max_length=10)
+    logo_url: str | None = Field(default=None, max_length=500)
+
+
+class SocietyPatch(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    category: str | None = Field(default=None, max_length=50)
+    status: str | None = None
+    advisor_id: str | None = Field(default=None, max_length=10)
+    logo_url: str | None = Field(default=None, max_length=500)
+
+
+class MemberBody(BaseModel):
+    user_id: str = Field(min_length=3, max_length=10)
+    role: str = "member"
+
+
 class EquipmentBody(BaseModel):
     barcode: str
     name: str
@@ -99,8 +125,50 @@ class EquipmentPatch(BaseModel):
 
 # ── Venues & societies ──
 @router.get("/societies")
-def societies(actor: Actor = Depends(current_actor)):
-    return {"all": requisitions.list_societies(actor), "mine": requisitions.my_societies(actor)}
+def societies_list(actor: Actor = Depends(current_actor)):
+    return {"all": societies_svc.list_societies(actor), "mine": societies_svc.my_societies(actor)}
+
+
+@router.get("/admin/societies")
+def admin_societies(q: str | None = None, actor: Actor = Depends(current_actor)):
+    return societies_svc.list_societies(actor, include_inactive=True, q=q)
+
+
+@router.post("/admin/societies")
+def admin_create_society(body: SocietyBody, actor: Actor = Depends(current_actor)):
+    return societies_svc.create_society(actor, body.name, body.description or "", body.category or "", body.advisor_id, body.logo_url or "")
+
+
+@router.put("/admin/societies/{society_id}")
+def admin_update_society(society_id: int, body: SocietyPatch, actor: Actor = Depends(current_actor)):
+    return societies_svc.update_society(actor, society_id, **body.model_dump(exclude_none=True))
+
+
+@router.post("/admin/societies/import")
+def admin_import_societies(actor: Actor = Depends(current_actor)):
+    """Re-import the official list from giki.edu.pk (same domain/robots restrictions as the knowledge crawler)."""
+    return societies_svc.import_official(actor)
+
+
+@router.get("/admin/societies/{society_id}/members")
+def society_members(society_id: int, actor: Actor = Depends(current_actor)):
+    return societies_svc.members(actor, society_id)
+
+
+@router.post("/admin/societies/{society_id}/members")
+def society_add_member(society_id: int, body: MemberBody, actor: Actor = Depends(current_actor)):
+    return societies_svc.set_membership(actor, society_id, body.user_id, body.role)
+
+
+@router.delete("/admin/societies/{society_id}/members/{user_id}")
+def society_remove_member(society_id: int, user_id: str, actor: Actor = Depends(current_actor)):
+    return societies_svc.set_membership(actor, society_id, user_id, None)
+
+
+@router.get("/venues/{venue_id}")
+def venue_detail(venue_id: str, actor: Actor = Depends(current_actor)):
+    """Trusted lookup used to pre-fill the reservation form from a venue's database ID."""
+    return requisitions.get_venue(actor, venue_id)
 
 
 @router.get("/venues")
@@ -115,7 +183,7 @@ def venue_availability(venue_id: str, date: str, actor: Actor = Depends(current_
 
 @router.post("/venues/recommend")
 def recommend(body: RecommendBody, actor: Actor = Depends(current_actor)):
-    return requisitions.recommend_venue(actor, body.description, body.attendees, body.facilities, body.date, body.start_time, body.duration_hours)
+    return requisitions.recommend_venue(actor, body.description, body.attendees, body.facilities, body.date, body.start_time, body.duration_hours, body.venue_type)
 
 
 @router.post("/venues")

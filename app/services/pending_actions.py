@@ -75,7 +75,7 @@ EXECUTORS = {
     "cancel_mess_out_request": (lambda a, **k: mess.cancel_mess_out(a, int(k["request_id"])), _v_cancel_mess),
     "book_sports_facility": (lambda a, **k: sports.book(a, k["facility_id"], k["date"], k["start_time"], k.get("duration_hours", 1.0)), _v_booking),
     "cancel_sports_booking": (lambda a, **k: sports.cancel(a, k["booking_ref"], "cancelled via assistant"), _v_cancel_booking),
-    "submit_society_requisition": (lambda a, **k: requisitions.submit_requisition(a, **k), _v_requisition),
+    "submit_venue_reservation": (lambda a, **k: requisitions.submit_requisition(a, **k), _v_requisition),
     "cancel_society_requisition": (lambda a, **k: requisitions.cancel_requisition(a, k["requisition_id"]), _v_cancel_req),
     "checkout_lab_equipment": (lambda a, **k: equipment.checkout(a, k["barcode"], k["purpose"], k.get("days")), _v_checkout),
     "return_lab_equipment": (lambda a, **k: equipment.return_equipment(a, k["barcode"], k.get("condition", "good"), k.get("note", "")), _v_return),
