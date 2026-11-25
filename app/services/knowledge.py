@@ -233,7 +233,7 @@ def search(question: str, k: int = 4) -> list[dict]:
                       FROM knowledge_chunks c JOIN knowledge_sources s USING (source_id)
                       WHERE s.status = 'active' AND c.tsv @@ to_tsquery('english', %s) ORDER BY rank DESC LIMIT 12""", (tsq, tsq))
     vec_rows = []
-    qv = embeddings.embed([question], task="RETRIEVAL_QUERY")[0]
+    qv = embeddings.embed([question], task="RETRIEVAL_QUERY", retries=2)[0]
     if qv:
         v = embeddings.to_pg(qv)
         vec_rows = db.query("""SELECT c.chunk_id, 1 - (c.embedding <=> %s::vector) AS sim, c.section, c.page_from, c.content, s.url, s.title, s.fetched_at

@@ -8,6 +8,7 @@ logger = logging.getLogger("g_cortex.embeddings")
 MODEL = "gemini-embedding-001"
 DIM = 1536
 _client = None
+_blocked_until = 0.0          # circuit breaker: after the quota is exhausted, further calls fail fast (full-text fallback) instead of stalling for minutes
 
 
 def _get_client():
@@ -28,9 +29,10 @@ def _norm(v: list[float]) -> list[float]:
 
 def embed(texts: list[str], task: str = "RETRIEVAL_DOCUMENT", batch: int = 50, retries: int = 6) -> list[list[float] | None]:
     """Return one normalised vector per text, or None where the service could not embed it (callers fall back to full-text)."""
+    global _blocked_until
     cl = _get_client()
     out: list[list[float] | None] = [None] * len(texts)
-    if cl is None:
+    if cl is None or time.monotonic() < _blocked_until:
         return out
     from google.genai import types
     for start in range(0, len(texts), batch):
@@ -44,9 +46,12 @@ def embed(texts: list[str], task: str = "RETRIEVAL_DOCUMENT", batch: int = 50, r
             except Exception as exc:
                 msg = str(exc)
                 if any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE")) and attempt < retries - 1:
-                    time.sleep(min(60, 12 * (attempt + 1)))
+                    time.sleep(min(60, 12 * (attempt + 1)) if retries > 2 else 3)
                     continue
                 logger.warning("embedding batch failed: %s", msg[:200])
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                    _blocked_until = time.monotonic() + 600
+                    return out
                 break
     return out
 
