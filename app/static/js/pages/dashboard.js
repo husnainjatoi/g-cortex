@@ -3,6 +3,7 @@ import { h, statCard, badge, fmtDate, fmtDateTime, money, table, pageHead } from
 
 export async function render(root, { user }) {
   const d = await api.get('/api/portal/dashboard');
+  const deg = await api.get('/api/courses/me/degree-progress').catch(() => null);
   root.append(pageHead(`Welcome, ${user.full_name.split(' ')[0]}`, `${d.courses.term} · your campus at a glance`));
   if (d.courses.has_conflicts) root.append(h('div', { class: 'alert warn' }, '⚠ Your registered courses have a timetable clash. ', h('a', { href: '#/courses' }, 'Review your timetable')));
   root.append(h('div', { class: 'grid g4' },
@@ -18,7 +19,10 @@ export async function render(root, { user }) {
       table([{ label: 'ID', key: 'requisition_id' }, { label: 'Event', key: 'event_title' }, { label: 'Waiting on', render: r => r.pending_authority || '—' }], d.requisitions, { empty: 'No requisitions awaiting approval.' }),
       h('p', null, h('a', { href: '#/requisitions' }, 'Manage requisitions →')))));
   root.append(h('div', { class: 'grid g2' },
-    h('div', { class: 'card' }, h('h2', null, 'Mess deposit'), h('p', { class: 'muted' }, 'Your security deposit and clearance status are shown under Mess → Security deposit.'), h('p', null, h('a', { href: '#/mess' }, 'Open Mess Management →'))),
+    h('div', { class: 'card', id: 'degree-card' }, h('h2', null, 'Degree progress'), deg
+      ? [h('p', null, h('b', null, deg.program.name), ` · semester ${deg.current_semester}`), h('div', { class: 'bar' }, h('i', { style: `width:${Math.round(100 * deg.credits.completed / Math.max(1, deg.credits.total))}%` })),
+         h('p', { class: 'small muted' }, `${deg.credits.completed} of ${deg.credits.total} credit hours completed · ${deg.credits.in_progress} in progress${deg.demo_assumption ? ' (demo assumption)' : ''}`), h('p', null, h('a', { href: '#/courses' }, 'Open degree plan →'))]
+      : h('p', { class: 'muted' }, 'Your degree programme is not set up yet.')),
     h('div', { class: 'card' }, h('h2', null, 'Equipment in your custody'),
       table([{ label: 'Item', key: 'name' }, { label: 'Barcode', key: 'barcode' }, { label: 'Due', render: r => h('span', null, fmtDate(r.due_date), ' ', r.overdue ? badge('overdue') : null) }], d.equipment, { empty: 'You are not holding any equipment.' }))));
   root.append(h('div', { class: 'card flat' }, h('b', null, 'Tip: '), 'press the ✦ button to ask the assistant to do any of this for you — it uses the same rules as these pages.'));

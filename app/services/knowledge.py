@@ -213,7 +213,8 @@ def status(actor: Actor) -> dict:
 
 
 def list_sources(actor: Actor | None = None) -> list[dict]:
-    return db.query("""SELECT s.source_id, s.url, s.title, s.doc_type, s.status, s.error, s.page_count, s.fetched_at, s.last_checked_at,
+    return db.query("""SELECT s.source_id, s.url, s.title, s.doc_type, s.status, s.error, s.page_count, s.fetched_at, s.last_checked_at, s.series, s.version_label, s.published_at, s.superseded_by,
+                              (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.source_id=s.source_id AND c.embedding IS NOT NULL) AS embedded,
                               (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.source_id=s.source_id) AS chunks FROM knowledge_sources s ORDER BY s.doc_type DESC, s.title""")
 
 

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app.api.deps import current_actor
-from app.services import audit, auth, catalog_import, courses, events, knowledge, reports, settings
+from app.services import audit, auth, catalog_import, courses, curriculum, events, knowledge, reports, settings
 from app.services.actor import Actor
 
 router = APIRouter()
@@ -214,6 +214,20 @@ def knowledge_status(actor: Actor = Depends(current_actor)):
 def knowledge_sources(actor: Actor = Depends(current_actor)):
     actor.require_scope("academic")
     return knowledge.list_sources(actor)
+
+
+@router.get("/knowledge/programs")
+def knowledge_programs(actor: Actor = Depends(current_actor)):
+    actor.require_scope("academic")
+    return db.query("""SELECT p.code, p.name, p.faculty, p.plan_status, p.source_page, p.review_notes, p.retrieved_at,
+                              (SELECT COUNT(*) FROM program_courses c WHERE c.program_id=p.program_id) AS rows,
+                              (SELECT COUNT(*) FROM program_tracks t WHERE t.program_id=p.program_id) AS tracks FROM academic_programs p ORDER BY p.faculty, p.name""")
+
+
+@router.post("/knowledge/curriculum-import")
+def knowledge_curriculum_import(actor: Actor = Depends(current_actor)):
+    """Re-run the idempotent import of the stored Undergraduate Prospectus 2025 (degree plans, tracks, official minor)."""
+    return curriculum.import_prospectus_2025(actor)
 
 
 @router.post("/knowledge/refresh")

@@ -176,3 +176,36 @@ def test_reservation_over_http_with_trusted_venue_lookup(actors, imported):
     assert bad.status_code == 422 and "String should" not in bad.text and "fields" in bad.json()
     assert c.post("/api/req/admin/societies/import").status_code == 403
     assert c.get("/api/req/admin/societies").status_code == 403
+
+
+def test_admin_society_changes_reach_the_student_form_the_assistant_and_survive_reimport(actors, imported):
+    from app.agents import runtime
+    from app.agents.tools import req_tools
+    from tests.test_api import client, login
+    import main
+    stu, _ = login(main.app, "u2024405@giki.edu.pk")
+    adm, _ = login(main.app, "dsa2@giki.edu.pk")
+    assert stu.get("/api/req/admin/societies").status_code == 403 and stu.post("/api/req/admin/societies", json={"name": "Hackers"}).status_code == 403
+    assert stu.post("/api/req/admin/societies/import").status_code == 403
+    assert adm.post("/api/req/admin/societies", json={"name": "Quantum Computing Society", "description": "Qubits"}).status_code == 200
+    names = lambda r: [s["name"] for s in r.json()["all"]]
+    assert "Quantum Computing Society" in names(stu.get("/api/req/societies"))                        # the New Requisition dropdown source
+    tok = runtime.set_context(actors["s1"], "t")
+    try:
+        assert "Quantum Computing Society" in [x["name"] for x in req_tools.list_societies()["societies"]]            # same table feeds the assistant
+    finally:
+        runtime.reset_context(tok)
+    q = sid("Quantum")
+    assert adm.put(f"/api/req/admin/societies/{q}", json={"status": "inactive"}).status_code == 200
+    assert "Quantum Computing Society" not in names(stu.get("/api/req/societies"))                    # deactivation is immediate
+    tok = runtime.set_context(actors["s1"], "t")
+    try:
+        assert "Quantum Computing Society" not in [x["name"] for x in req_tools.list_societies()["societies"]]
+    finally:
+        runtime.reset_context(tok)
+    r = stu.post("/api/req/requisitions", json={"reservation_type": "society", "society_id": q, "venue_id": "SEM_HALL_1", "event_title": "x", "booking_date": day(10), "start_time": "14:00",
+                                                "duration_hours": 2, "expected_attendees": 10})
+    assert r.status_code == 409 and "not an active society" in r.json()["detail"]                       # the backend refuses even if the form is bypassed
+    societies.update_society(actors["req"], sid("ACM"), description="Edited by an administrator")
+    societies.import_official(actors["req"], html_override=PAGE)
+    assert societies.get_society(sid("ACM"))["description"] == "Edited by an administrator"

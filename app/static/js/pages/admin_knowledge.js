@@ -8,7 +8,7 @@ export async function render(root, ctx) {
   root.append(h('div', { class: 'card' }, h('div', { class: 'row' }, h('button', { class: 'btn primary', disabled: st.running, onclick: async () => { if (!(await confirmDialog('Refresh official data?', 'Re-crawls the configured pages and documents on giki.edu.pk only (robots.txt honoured, rate limited), re-indexes changed documents and re-validates the course catalogue. This can take several minutes.', 'Start refresh'))) return; try { await api.post('/api/admin/knowledge/refresh'); toast('Refresh started in the background.', 'ok'); setTimeout(ctx.refresh, 1500); } catch (e) { toast(e.message, 'bad'); } } }, st.running ? 'Refresh running…' : 'Refresh from giki.edu.pk'),
     st.last_run ? h('span', { class: 'muted' }, `Last run #${st.last_run.run_id}: ${st.last_run.status}${st.last_run.finished_at ? ' · ' + fmtDateTime(st.last_run.finished_at) : ''}`) : h('span', { class: 'muted' }, 'Never run'))));
   const holder = h('div'); root.append(holder);
-  tabs(holder, [{ key: 'f', label: 'Course review flags', render: () => flags(ctx) }, { key: 's', label: 'Sources', render: sources }]);
+  tabs(holder, [{ key: 'f', label: 'Course review flags', render: () => flags(ctx) }, { key: 'p', label: 'Degree programmes', render: () => programmes(ctx) }, { key: 's', label: 'Sources', render: sources }]);
 }
 
 async function flags(ctx) {
@@ -21,5 +21,14 @@ async function flags(ctx) {
 
 async function sources() {
   const rows = await api.get('/api/admin/knowledge/sources');
-  return table([{ label: 'Document', render: s => h('a', { href: s.url, target: '_blank', rel: 'noopener' }, s.title || s.url) }, { label: 'Type', key: 'doc_type' }, { label: 'Passages', key: 'chunks' }, { label: 'Fetched', render: s => fmtDateTime(s.fetched_at) }, { label: 'Last checked', render: s => fmtDateTime(s.last_checked_at) }, { label: 'Status', render: s => badge(s.status, s.status === 'active' ? 'ok' : 'bad') }, { label: 'Note', render: s => s.error || '' }], rows, { empty: 'No sources ingested yet. Run a refresh.' });
+  return table([{ label: 'Document', render: s => h('a', { href: s.url, target: '_blank', rel: 'noopener' }, s.title || s.url) }, { label: 'Type', key: 'doc_type' }, { label: 'Passages', key: 'chunks' }, { label: 'Fetched', render: s => fmtDateTime(s.fetched_at) }, { label: 'Last checked', render: s => fmtDateTime(s.last_checked_at) }, { label: 'Version', render: s => s.version_label ? `${s.series || ''} ${s.version_label}`.trim() : '—' }, { label: 'Embedded', render: s => `${s.embedded}/${s.chunks}` }, { label: 'Status', render: s => badge(s.status, s.status === 'active' ? 'ok' : s.status === 'superseded' ? 'mute' : 'bad') }, { label: 'Note', render: s => s.error || '' }], rows, { empty: 'No sources ingested yet. Run a refresh.' });
+}
+
+async function programmes(ctx) {
+  const rows = await api.get('/api/admin/knowledge/programs');
+  return h('div', null, h('div', { class: 'alert info' }, 'Semester-wise degree plans imported from the Undergraduate Prospectus 2025. A plan marked “needs review” has rows that could not be read unambiguously (or whose credit total does not match the printed total); nothing was guessed. The import is repeatable and never overwrites hand-made courses.'),
+    h('p', null, h('button', { class: 'btn primary', onclick: async () => { if (!(await confirmDialog('Re-run the curriculum import?', 'Re-reads the stored prospectus. It is idempotent: unchanged data stays unchanged.', 'Import'))) return; try { const r = await api.post('/api/admin/knowledge/curriculum-import'); toast(`Done: ${r.programs} programmes, ${r.program_rows} plan rows, ${r.courses_created} new catalogue courses.`, 'ok', 7000); ctx.refresh(); } catch (e) { toast(e.message, 'bad', 7000); } } }, 'Re-run curriculum import')),
+    table([{ label: 'Programme', render: p => h('div', null, h('b', null, p.name), h('div', { class: 'small muted' }, p.faculty)) }, { label: 'Plan rows', key: 'rows' }, { label: 'Tracks', key: 'tracks' }, { label: 'Page', key: 'source_page' },
+      { label: 'Status', render: p => badge(p.plan_status.replace('_', ' '), p.plan_status === 'parsed' ? 'ok' : 'warn') },
+      { label: 'Review notes', render: p => p.review_notes.length ? h('ul', { class: 'small' }, p.review_notes.map(n => h('li', null, n.kind === 'unparsed_row' ? `Row not read (p. ${n.page}): ${n.line}` : `Semester ${n.semester}: parsed ${n.parsed} credit hours, printed total ${n.declared}`))) : '—' }], rows, { empty: 'No programmes imported yet.' }));
 }

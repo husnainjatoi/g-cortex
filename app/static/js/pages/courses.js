@@ -11,6 +11,7 @@ export async function render(root, ctx) {
     { key: 'catalog', label: 'Course catalog', render: () => catalog(ctx) },
     { key: 'mine', label: 'My registrations', render: () => mine(ctx) },
     { key: 'tt', label: 'Timetable', render: timetable },
+    { key: 'degree', label: 'Degree plan', render: degree },
     { key: 'plan', label: 'Planner & what-if', render: planner },
     { key: 'ask', label: 'Ask GIKI', render: ask },
     { key: 'record', label: 'Academic record', render: record },
@@ -99,6 +100,38 @@ async function timetable() {
   return wrap;
 }
 
+const STATUS = { completed: ['completed', 'ok'], in_progress: ['in progress', 'info'], eligible: ['eligible', 'ok'], blocked: ['blocked by prerequisites', 'bad'], open_slot: ['elective slot', 'mute'] };
+
+// Semester-wise curriculum from the official prospectus, with the student's progress. Choosing another programme is the what-if for changing degree.
+async function degree() {
+  const wrap = h('div'); const body = h('div');
+  const progs = await api.get('/api/courses/programs'); const mine = await api.get('/api/courses/me/degree-progress');
+  const prog = select(progs.map(p => [p.code, p.name]), mine.program.code, { id: 'degree-programme' }); const trackSel = h('select', { id: 'degree-track' });
+  const draw = async (code, track) => {
+    try {
+      const d = await api.get('/api/courses/me/degree-progress' + qs({ program: code, track }));
+      put(trackSel, d.tracks.map(t => h('option', { value: t, selected: t === d.selected_track }, t))); trackSel.parentElement.style.display = d.tracks.length ? '' : 'none';
+      const c = d.credits;
+      put(body,
+        d.program.plan_status !== 'parsed' ? h('div', { class: 'alert warn' }, 'Part of this programme\'s plan could not be read unambiguously from the prospectus and is under administrator review.') : null,
+        d.is_students_own_programme ? null : h('div', { class: 'alert info' }, `What-if: this is ${d.program.name}, not your programme. Courses you have already passed count wherever the same course code appears. Nothing is changed.`),
+        d.demo_assumption && d.is_students_own_programme ? h('div', { class: 'alert info' }, 'Demo account: earlier semesters are assumed passed and the current semester assumed in progress (no grades are recorded for these).') : null,
+        h('div', { class: 'grid g4' }, statCard2('Completed', c.completed), statCard2('In progress', c.in_progress), statCard2('Remaining', c.remaining), statCard2('Programme total', c.total)),
+        d.timetable_conflicts.length ? h('div', { class: 'alert warn' }, 'Timetable clashes with your registered courses: ', d.timetable_conflicts.map(x => `${x.course} vs ${x.conflicts_with}`).join(', ')) : null,
+        d.semesters.map(sem => h('div', { class: 'card' }, h('h3', null, `Semester ${sem.semester}`, h('span', { class: 'small muted' }, `  ${sem.credits_completed} credit hours completed`)),
+          table([{ label: 'Code', render: x => x.course_code ? h('b', null, x.course_code) : '—' }, { label: 'Course', key: 'title' }, { label: 'Cr', key: 'credit_hours' },
+            { label: 'Prerequisites', render: x => x.prerequisites || '—' }, { label: 'Status', render: x => h('span', null, badge(...STATUS[x.status]), x.missing_prerequisites.length ? h('div', { class: 'small muted' }, `needs ${x.missing_prerequisites.join(', ')}`) : null) },
+            { label: 'Offered now', render: x => x.course_code ? (x.offered_this_term ? 'yes' : 'not scheduled') : '—' }], sem.courses))),
+        h('p', { class: 'small muted' }, 'Source: ', h('a', { href: d.program.source_url, target: '_blank', rel: 'noopener' }, 'GIKI Undergraduate Prospectus 2025'), d.program.source_page ? ` · page ${d.program.source_page}` : '', ' · ', d.notes.join(' ')));
+    } catch (e) { put(body, errorBox(e)); }
+  };
+  prog.addEventListener('change', () => draw(prog.value)); trackSel.addEventListener('change', () => draw(prog.value, trackSel.value));
+  wrap.append(h('div', { class: 'card' }, h('div', { class: 'row' }, h('div', { style: 'min-width:260px' }, field('Degree programme', prog)), h('div', { style: 'min-width:260px' }, field('Track (semesters 5-8)', trackSel)))), body);
+  await draw(mine.program.code, mine.selected_track);
+  return wrap;
+}
+const statCard2 = (l, v) => h('div', { class: 'card stat' }, h('div', { class: 'l' }, `${l} (credit hours)`), h('div', { class: 'v' }, v));
+
 async function planner() {
   const wrap = h('div');
   const recOut = h('div'); const interests = h('input', { placeholder: 'e.g. machine learning, embedded systems' });
@@ -114,16 +147,20 @@ async function planner() {
   recs(false);
 
   const minors = await api.get('/api/courses/minors'); const all = await api.get('/api/courses');
-  const out = h('div'); const sel = h('select', { multiple: true, size: 3 }, minors.map(m => h('option', { value: m.minor_name, selected: true }, m.minor_name)));
+  const official = minors.filter(m => m.status === 'official'), unverified = minors.filter(m => m.status !== 'official');
+  const out = h('div'); const sel = h('select', { multiple: true, size: Math.max(2, official.length) }, official.map(m => h('option', { value: m.minor_name, selected: true }, m.minor_name)));
   const extra = h('select', { multiple: true, size: 5 }, all.filter(c => c.student_status !== 'completed').map(c => h('option', { value: c.course_code }, `${c.course_code} – ${c.title}`)));
   wrap.append(h('div', { class: 'card' }, h('h2', null, 'What-if degree & minor simulator'),
-    h('div', { class: 'grid g2' }, field('Minor(s) to evaluate', sel, 'Hold Ctrl/Cmd to compare several minors'), field('Assume I also complete…', extra, 'Hypothetical courses — nothing is registered')),
+    h('div', { class: 'grid g2' }, field('Official minor(s) to evaluate', sel, unverified.length ? `Only officially published minors are listed. ${unverified.length} other minor(s) in the system are unverified and under administrator review.` : 'Hold Ctrl/Cmd to compare several minors'), field('Assume I also complete…', extra, 'Hypothetical courses — nothing is registered')),
     h('button', { class: 'btn primary', onclick: async () => {
       try {
         const r = await api.post('/api/courses/me/what-if', { minors: [...sel.selectedOptions].map(o => o.value), hypothetical_courses: [...extra.selectedOptions].map(o => o.value) });
-        clear(out).append(...r.minors.map(m => h('div', { class: 'card flat' }, h('div', { class: 'row spread' }, h('h3', null, m.minor), badge(`${m.progress_pct}% planned`, m.progress_pct >= 100 ? 'ok' : 'info')),
-          h('div', { class: 'bar' }, h('i', { style: `width:${m.progress_pct}%` })),
-          h('p', null, 'Completed: ', m.completed.join(', ') || '—', h('br'), 'In progress / assumed: ', m.in_progress_or_planned.join(', ') || '—', h('br'), 'Still needed: ', m.remaining.join(', ') || 'none', ` (${m.credits_remaining} credit hours)`),
+        put(clear(out), r.minors.map(m => h('div', { class: 'card flat' }, h('div', { class: 'row spread' }, h('h3', null, m.minor), m.progress_pct == null ? badge('official · no fixed requirement', 'info') : badge(`${m.progress_pct}% planned`, m.progress_pct >= 100 ? 'ok' : 'info')),
+          m.progress_pct != null ? h('div', { class: 'bar' }, h('i', { style: `width:${m.progress_pct}%` })) : null,
+          m.requirement_note ? h('div', { class: 'alert info' }, m.requirement_note) : null,
+          m.course_pool ? h('p', null, h('b', null, 'Courses the prospectus lists for this minor: '), m.course_pool.join(', '), h('br'), 'You have completed: ', m.pool_completed.join(', ') || '—', h('br'), 'In progress / assumed: ', m.pool_in_progress.join(', ') || '—') : null,
+          m.required_courses.length ? h('p', null, 'Completed: ', m.completed.join(', ') || '—', h('br'), 'In progress / assumed: ', m.in_progress_or_planned.join(', ') || '—', h('br'), 'Still needed: ', m.remaining.join(', ') || 'none', ` (${m.credits_remaining} credit hours)`) : null,
+          m.source_url ? h('p', { class: 'small muted' }, 'Source: ', h('a', { href: m.source_url, target: '_blank', rel: 'noopener' }, 'Undergraduate Prospectus 2025'), m.offered_by ? ` · ${m.offered_by}` : '') : null,
           Object.keys(m.prerequisite_blockers).length ? h('div', { class: 'alert warn' }, 'Blocked by prerequisites: ', Object.entries(m.prerequisite_blockers).map(([c, p]) => `${c} needs ${p.join(', ')}`).join(' · ')) : null,
           m.eligible_next.length ? h('p', null, h('b', null, 'You can take next: '), m.eligible_next.join(', ')) : null)),
           Object.keys(r.shared_courses_between_minors).length ? h('div', { class: 'alert info' }, 'Shared between minors: ', Object.entries(r.shared_courses_between_minors).map(([k, v]) => `${k}: ${v.join(', ')}`).join(' · ')) : null);
