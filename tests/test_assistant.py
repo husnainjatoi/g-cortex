@@ -199,58 +199,121 @@ def _eat(uid, day, meal):
         cur.execute("INSERT INTO mess_ledger (user_id, meal_date, meal_type, status, source) VALUES (%s,%s,%s,'consumed','turnstile') ON CONFLICT DO NOTHING", (uid, day, meal))
 
 
-def _set_rates(adm, b=40, l=100, d=90):
-    for m, r in (("breakfast", b), ("lunch", l), ("dinner", d)):
-        assert adm.put("/api/mess/admin/rates", json={"meal_type": m, "rate_pkr": r, "effective_from": "2026-01-01"}).status_code == 200
+def _shared_cost_mode():
+    with db.tx() as cur:
+        cur.execute("UPDATE system_settings SET value='shared_cost' WHERE key='mess_billing_mode'")
 
 
-def test_estimated_bill_matches_between_website_and_assistant_and_follows_rate_changes(app):
+def _expenditure(adm, month, amount):
+    r = adm.post("/api/mess/admin/expenses", json={"month": month, "amount_pkr": amount, "description": "LLM test"})
+    assert r.status_code == 200, r.text
+
+
+def _money_in(reply, n):
+    return f"{n:,.0f}" in reply or f"{n:.0f}" in reply.replace(",", "") or f"{n:,.2f}" in reply
+
+
+def _three_students_eat(day):
+    for uid in ("2024405", "2024668", "2024662"):
+        _eat(uid, day, "lunch")
+    _eat("2024405", day, "dinner")
+
+
+def test_estimated_bill_is_the_shared_cost_figure_on_website_and_in_assistant(app):
+    _shared_cost_mode()
     web = session(app, "u2024405@giki.edu.pk"); adm = session(app, "mess@giki.edu.pk")
     first = clock.today().replace(day=1)
-    _set_rates(adm)
-    _eat("2024405", first, "lunch"); _eat("2024405", first, "dinner"); _eat("2024405", first, "breakfast")
+    _expenditure(adm, first.strftime("%Y-%m"), 3000)
+    _three_students_eat(first)                                      # 3 DISTINCT students use the mess (a second meal of one student does not add a student)
     site = web.get("/api/mess/me/bill").json()
-    assert site["kind"] == "estimate" and site["amount_pkr"] == 230.0 and site["days_consumed"] == 1
-    chat = Chat(web)
-    out = chat.say("How much is my mess bill this month?")
-    assert out["routed_to"] == ["mess_management_subagent"] and "230" in out["reply"].replace(",", "")
-    assert "estimate" in out["reply"].lower()
-    assert "rebate" not in out["reply"].lower() or "no rebate" in out["reply"].lower()
-    # administrator changes a rate -> both interfaces move together
-    assert adm.put("/api/mess/admin/rates", json={"meal_type": "lunch", "rate_pkr": 150, "effective_from": first.isoformat()}).status_code == 409 or True
-    adm.put("/api/mess/admin/rates", json={"meal_type": "lunch", "rate_pkr": 150, "effective_from": clock.today().isoformat()})
+    assert site["kind"] == "estimate" and site["students_using_mess"] == 3 and site["amount_pkr"] == 1000.0
+    out = Chat(web).say("What is my estimated mess bill this month?")
+    assert out["routed_to"] == ["mess_management_subagent"], out
+    reply = out["reply"].lower()
+    assert _money_in(out["reply"], 1000) and "estimate" in reply                       # the backend number, labelled as an estimate
+    import re
+    assert not re.search(r"rebate[^.]*\d", reply) and "prepaid" not in reply
+    adm.put(f"/api/mess/admin/expenses/{first.strftime('%Y-%m')}", json={"amount_pkr": 6000, "reason": "supplier invoice corrected"})
     site2 = web.get("/api/mess/me/bill").json()
-    out2 = Chat(web).say("What is my estimated mess bill for this month right now?")
-    assert str(int(site2["amount_pkr"])) in out2["reply"].replace(",", "")
+    assert site2["amount_pkr"] == 2000.0
+    assert _money_in(Chat(web).say("What is my estimated mess bill this month?")["reply"], 2000)       # the assistant follows the correction: no private calculation
 
 
-def test_last_month_invoice_deposit_and_dues_via_assistant(app):
+def test_assistant_explains_the_shared_cost_formula_from_backend_data(app):
+    _shared_cost_mode()
+    web = session(app, "u2024405@giki.edu.pk"); adm = session(app, "mess@giki.edu.pk")
+    first = clock.today().replace(day=1)
+    _expenditure(adm, first.strftime("%Y-%m"), 3000); _three_students_eat(first)
+    out = Chat(web).say("How is my mess bill calculated?")
+    assert out["routed_to"] == ["mess_management_subagent"]
+    r = out["reply"].lower()
+    assert "expenditure" in r and "student" in r and ("divid" in r or "÷" in r or "/" in r)
+    import re
+    assert not re.search(r"rebate[^.]*\d", r)                                       # may say "there are no rebates", never quotes a rebate amount
+
+
+def test_no_expenditure_recorded_means_no_invented_number(app):
+    _shared_cost_mode()
+    web = session(app, "u2024405@giki.edu.pk")
+    _eat("2024405", clock.today().replace(day=1), "lunch")
+    assert web.get("/api/mess/me/bill").json()["amount_pkr"] is None
+    out = Chat(web).say("What is my estimated mess bill this month?")
+    assert out["routed_to"] == ["mess_management_subagent"]
+    import re
+    assert not re.search(r"(?:PKR|Rs\.?)\s*[\d,]{3,}", out["reply"]), out["reply"]            # no amount is made up
+    assert any(w in out["reply"].lower() for w in ("not", "yet", "unavailable", "cannot", "can't"))
+
+
+def test_last_month_invoice_payment_status_and_dues_via_assistant(app):
+    _shared_cost_mode()
     web = session(app, "u2024405@giki.edu.pk"); adm = session(app, "mess@giki.edu.pk")
     prev_last = clock.today().replace(day=1) - datetime.timedelta(days=1)
     month = prev_last.strftime("%Y-%m")
-    _set_rates(adm, 40, 100, 90)
-    _eat("2024405", prev_last.replace(day=3), "lunch"); _eat("2024405", prev_last.replace(day=4), "lunch"); _eat("2024405", prev_last.replace(day=4), "dinner")
+    _expenditure(adm, month, 3000); _three_students_eat(prev_last.replace(day=3))
     gen = adm.post("/api/mess/admin/invoices/generate", json={"month": month}).json()
-    assert gen["created"] == 1
+    assert gen["created"] == 3
     inv = web.get("/api/mess/me/invoices").json()[0]
-    assert inv["total_pkr"] == 290.0
+    assert inv["total_pkr"] == 1000.0 and inv["status"] == "unpaid"
     chat = Chat(web)
-    out = chat.say("Show me last month's mess bill.")
-    assert out["routed_to"] == ["mess_management_subagent"] and ("290" in out["reply"].replace(",", "")) and inv["invoice_no"] in out["reply"]
-    # deposit
-    assert adm.put("/api/admin/settings/mess_deposit_amount", json={"value": "10000"}).status_code == 200
-    assert adm.post("/api/mess/admin/deposits/2024405/payments", json={"amount_pkr": 10000, "reference": "DEP-LLM-1", "verified": True}).status_code == 200
-    dep = chat.say("How much is my refundable mess security deposit?")
-    assert "10000" in dep["reply"].replace(",", "") or "10,000" in dep["reply"]
-    dues = chat.say("How much do I currently owe the mess?")
-    assert "290" in dues["reply"].replace(",", "")
+    out = chat.say("Show me last month's mess invoice.")
+    assert out["routed_to"] == ["mess_management_subagent"] and inv["invoice_no"] in out["reply"] and _money_in(out["reply"], 1000)
+    assert "estimate" not in out["reply"].lower() or "not an estimate" in out["reply"].lower() or "finalized" in out["reply"].lower()
+    paid = chat.say("Have I paid my mess bill?")
+    assert any(w in paid["reply"].lower() for w in ("not", "unpaid", "outstanding", "haven't", "have not"))
+    dues = chat.say("How much do I owe?")
+    assert _money_in(dues["reply"], 1000)
     assert db.query_one("SELECT COUNT(*) AS n FROM mess_rebates")["n"] == 0
 
 
+def test_security_deposit_is_a_separate_refundable_amount_not_prepaid_credit(app):
+    web = session(app, "u2024405@giki.edu.pk")
+    dep = web.get("/api/mess/me/deposit").json()
+    assert dep["original_deposit_pkr"] == 15000.0 and dep["refundable_balance_pkr"] == 15000.0 and dep["status"] == "paid"
+    chat = Chat(web)
+    a = chat.say("How much was my original mess security deposit?")
+    assert a["routed_to"] == ["mess_management_subagent"] and _money_in(a["reply"], 15000)
+    b = chat.say("What is my refundable security deposit?")
+    assert _money_in(b["reply"], 15000) and "refund" in b["reply"].lower()
+    low = (a["reply"] + b["reply"]).lower()
+    import re
+    assert "prepaid" not in low or re.search(r"not (?:a )?prepaid", low)                # either silent or explicitly "not prepaid credit"
+    assert not re.search(r"rebate[^.]*\d", low)
+
+
+def test_meal_attendance_history_comes_from_verified_records(app):
+    web = session(app, "u2024405@giki.edu.pk")
+    d = clock.today() - datetime.timedelta(days=2)
+    _eat("2024405", d, "lunch"); _eat("2024405", d, "dinner")
+    out = Chat(web).say("Show me my mess attendance history.")
+    assert out["routed_to"] == ["mess_management_subagent"]
+    assert "lunch" in out["reply"].lower() and "dinner" in out["reply"].lower()
+
+
 def test_payment_receipt_via_assistant_needs_confirmation_and_admin_verification(app):
+    _shared_cost_mode()
     web = session(app, "u2024405@giki.edu.pk"); adm = session(app, "mess@giki.edu.pk")
     prev_last = clock.today().replace(day=1) - datetime.timedelta(days=1)
-    _set_rates(adm); _eat("2024405", prev_last.replace(day=3), "lunch")
+    _expenditure(adm, prev_last.strftime("%Y-%m"), 3000); _three_students_eat(prev_last.replace(day=3))
     adm.post("/api/mess/admin/invoices/generate", json={"month": prev_last.strftime("%Y-%m")})
     inv = web.get("/api/mess/me/invoices").json()[0]
     chat = Chat(web)
