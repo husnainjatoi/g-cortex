@@ -13,7 +13,7 @@ _SLOT = re.compile(r"^(\*{0,3}(?:[A-Z][A-Za-z&/ ]{3,60}?\*{0,2}|[A-Z][A-Za-z ]+ 
 _SLOT_SHORT = re.compile(r"^([A-Z][A-Za-z&/ ,.\-()]{3,80}?\*{0,3})\s+(\d)\s+(\d)\s*$")
 _MS_CODE = r"(?:[A-Z]{2}(?:/[A-Z]{2})+\s?\d[Xx]{2}|[A-Z]{2}\s?\d{3}(?:-?L)?|[A-Z]{2}\d[Xx]{2})"
 _MS_ROW = re.compile(rf"^(\S.*?)\s+({_MS_CODE})\s+(\d{{1,2}}(?:\+\d)?)(?:\s+(\S.*))?$")      # School of Management Sciences: `Title  CODE  Credits  Pre-req`
-_TOTAL = re.compile(r"^\s*Total\b", re.I)
+_TOTAL = re.compile(r"^\s*Total(?:\s+Semester|\s+Cr|\s+\d|\s*$)", re.I)
 
 # Where each degree plan starts. FCSE plans are identified by their position (six `Degree Plan` headings in the programme order below).
 PLAN_MARKER = re.compile(r"^(Degree Plan|Semester-wise Degree Plan:?|.*SEMESTER WISE BREAKDOWN.*|Electrical Engineering- Semester wise Breakdown)\s*(?:Semester 1st)?$|SEMESTER WISE BREAKDOWNSemester 1st|Semester-wise Degree PlanSemester 1st", re.I)

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app.api.deps import current_actor
-from app.services import courses
+from app.services import curriculum, courses
 from app.services.actor import Actor
 
 router = APIRouter()
@@ -69,7 +69,23 @@ def what_if(body: WhatIfBody, actor: Actor = Depends(current_actor)):
 
 @router.get("/minors")
 def minors(actor: Actor = Depends(current_actor)):
-    return db.query("SELECT minor_name, required_courses, required_credits, description FROM degree_minors ORDER BY minor_name")
+    """Minors with their verification status: only status='official' ones are officially supported; the rest are team-authored and unverified."""
+    return curriculum.official_minors()
+
+
+@router.get("/programs")
+def programs(actor: Actor = Depends(current_actor)):
+    return curriculum.list_programs()
+
+
+@router.get("/programs/{code}")
+def program(code: str, track: str | None = None, actor: Actor = Depends(current_actor)):
+    return curriculum.get_program(code, track)
+
+
+@router.get("/me/degree-progress")
+def degree_progress(program: str | None = None, track: str | None = None, actor: Actor = Depends(current_actor)):
+    return curriculum.degree_progress(actor, None, program, track)
 
 
 @router.post("/ask")

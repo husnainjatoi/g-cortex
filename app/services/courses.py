@@ -10,6 +10,7 @@ from .errors import Conflict, Forbidden, NotFound, RuleViolation, ValidationFail
 COURSE_ENROLLED = "course.enrolled"
 COURSE_DROPPED = "course.dropped"
 
+PASS_NO_GRADE = "P"        # pass without a letter grade (e.g. the demo-progress assumption): counts as passed/earned, never enters CGPA
 PASSING = {"A+": 4.0, "A": 4.0, "A-": 3.67, "B+": 3.33, "B": 3.0, "B-": 2.67, "C+": 2.33, "C": 2.0, "C-": 1.67, "D": 1.0}
 DAY_ORDER = ["M", "T", "W", "Th", "F", "Sa", "Su"]
 CODE_RE = re.compile(r"^[A-Z]{2,4}\d{3}$")
@@ -75,7 +76,7 @@ def _term(cur) -> str:
 
 
 def _passed(cur, user_id: str) -> set[str]:
-    cur.execute("SELECT course_code FROM course_history WHERE user_id=%s AND grade = ANY(%s)", (user_id, list(PASSING)))
+    cur.execute("SELECT course_code FROM course_history WHERE user_id=%s AND grade = ANY(%s)", (user_id, [*PASSING, PASS_NO_GRADE]))
     return {r["course_code"] for r in cur.fetchall()}
 
 
@@ -241,7 +242,7 @@ def academic_record(actor: Actor, student_id: str | None = None) -> dict:
         cur.execute("SELECT program, current_semester, interests, allergies FROM student_profiles WHERE user_id=%s", (sid,))
         prof = cur.fetchone() or {}
         return {"student_id": sid, "history": rows, "cgpa": round(pts / creds, 2) if creds else None,
-                "credits_earned": sum(r["credits"] for r in rows if r["grade"] in PASSING), "profile": dict(prof)}
+                "credits_earned": sum(r["credits"] for r in rows if r["grade"] in PASSING or r["grade"] == PASS_NO_GRADE), "profile": dict(prof)}
 
 
 # ── Student writes ──────────────────────────────────────────
@@ -369,16 +370,19 @@ def what_if(actor: Actor, minors: list[str] | None = None, hypothetical_courses:
             _course(cur, c)
         cur.execute("SELECT * FROM degree_minors ORDER BY minor_name")
         all_minors = {m["minor_name"]: m for m in cur.fetchall()}
-        wanted = minors or list(all_minors)
+        official = [n for n, m in all_minors.items() if m["status"] == "official"]
+        wanted = minors or official                      # unverified (team-authored) minors are never offered by default
         unknown = [m for m in wanted if m not in all_minors]
         if unknown:
-            raise NotFound(f"Unknown minor(s): {', '.join(unknown)}. Available: {', '.join(all_minors)}.")
+            raise NotFound(f"Unknown minor(s): {', '.join(unknown)}. Officially supported minors: {', '.join(official) or 'none'}.")
         effective = passed | regs | extra
         out, union_required = [], set()
         for name in wanted:
-            req = [c.strip() for c in all_minors[name]["required_courses"].split(",") if c.strip()]
+            m = all_minors[name]
+            req = [c.strip() for c in (m["required_courses"] or "").split(",") if c.strip()]
+            pool = [c.strip() for c in (m.get("course_pool") or "").split(",") if c.strip()]
             union_required |= set(req)
-            cur.execute("SELECT course_code, credits FROM courses WHERE course_code = ANY(%s)", (req,))
+            cur.execute("SELECT course_code, credits FROM courses WHERE course_code = ANY(%s)", (req + pool,))
             credits = {r["course_code"]: r["credits"] for r in cur.fetchall()}
             done = [c for c in req if c in passed]
             planned = [c for c in req if c not in passed and c in (regs | extra)]
@@ -388,14 +392,19 @@ def what_if(actor: Actor, minors: list[str] | None = None, hypothetical_courses:
                 miss = sorted(p for p in _all_prereqs(cur, c) if p not in effective)
                 if miss:
                     blockers[c] = miss
-            out.append({"minor": name, "required_courses": req, "required_credits": all_minors[name]["required_credits"],
-                        "completed": done, "in_progress_or_planned": planned, "remaining": remaining,
-                        "credits_completed": sum(credits.get(c, 0) for c in done),
-                        "credits_remaining": sum(credits.get(c, 0) for c in remaining),
-                        "prerequisite_blockers": blockers,
-                        "eligible_next": [c for c in remaining if c not in blockers],
-                        "progress_pct": round(100 * (len(done) + len(planned)) / max(1, len(req))),
-                        "feasible": True, "description": all_minors[name]["description"]})
+            entry = {"minor": name, "status": m["status"], "official": m["status"] == "official", "required_courses": req, "required_credits": m["required_credits"],
+                     "completed": done, "in_progress_or_planned": planned, "remaining": remaining,
+                     "credits_completed": sum(credits.get(c, 0) for c in done), "credits_remaining": sum(credits.get(c, 0) for c in remaining),
+                     "prerequisite_blockers": blockers, "eligible_next": [c for c in remaining if c not in blockers],
+                     "progress_pct": round(100 * (len(done) + len(planned)) / max(1, len(req))) if req else None,
+                     "feasible": True, "description": m["description"], "source_url": m.get("source_url"), "offered_by": m.get("offered_by")}
+            if m["status"] != "official":
+                entry["warning"] = "This minor was added by the project team and has NOT been verified against an official GIKI document."
+            if not m.get("requirements_stated", True):
+                entry.update(course_pool=pool, pool_completed=[c for c in pool if c in passed], pool_in_progress=[c for c in pool if c in (regs | extra) and c not in passed],
+                             pool_credits_completed=sum(credits.get(c, 0) for c in pool if c in passed),
+                             requirement_note="The prospectus lists these courses for the minor but does not state how many credit hours or which courses are required, so no completion target is calculated.")
+            out.append(entry)
         overlap = {}
         if len(wanted) > 1:
             for i, a in enumerate(out):

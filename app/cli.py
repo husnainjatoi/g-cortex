@@ -48,6 +48,8 @@ def main(argv=None):
     sub.add_parser("provision-all")
     d = sub.add_parser("set-dob"); d.add_argument("user_id"); d.add_argument("dob")
     r = sub.add_parser("reset-initial"); r.add_argument("user_id")
+    dp = sub.add_parser("init-demo-progress", help="mark earlier semesters passed and the current one in progress for EXPLICITLY named demo/seed students")
+    dp.add_argument("students", nargs="+"); dp.add_argument("--program", default=None); dp.add_argument("--track", default=None)
     args = ap.parse_args(argv)
 
     if args.cmd == "create-admin":
@@ -66,6 +68,10 @@ def main(argv=None):
     elif args.cmd == "reset-initial":
         auth.provision_initial_password(None, args.user_id)
         print("initial password re-issued; the user must change it at next sign-in")
+    elif args.cmd == "init-demo-progress":
+        import json
+        from app.services import curriculum
+        print(json.dumps(curriculum.init_demo_progress(curriculum.SYSTEM, args.students, args.program, args.track), indent=2))
     elif args.cmd == "provision-all":
         res = auth.provision_all_initial(None, only_missing=True)
         print(f"initial credentials issued to {len(res['provisioned'])} account(s); each user must change the password at first sign-in")

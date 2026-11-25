@@ -1,6 +1,6 @@
 """Course Management tools - thin adapters over app.services.courses (identical rules to the web portal)."""
 from app.agents.runtime import context, propose, tool
-from app.services import courses
+from app.services import courses, curriculum
 
 
 @tool
@@ -112,10 +112,40 @@ def simulate_what_if_degree(minors: list[str] | None = None, hypothetical_course
     hypothetically completing extra courses. Changes nothing.
 
     Args:
-        minors: Minor names, e.g. ['Artificial Intelligence']. Omit to evaluate all minors.
+        minors: Minor names, e.g. ['Artificial Intelligence']. Omit to evaluate the officially supported minors (unverified minors are only evaluated when named, and are labelled unverified).
         hypothetical_courses: Course codes to assume completed, e.g. ['MT201'].
     """
     return {"ok": True, **courses.what_if(context().actor, minors or None, hypothetical_courses or None)}
+
+
+@tool
+def list_degree_programmes() -> dict:
+    """List GIKI's undergraduate degree programmes (from the official Undergraduate Prospectus 2025), their tracks, and the officially supported minors.
+    Unverified minors are labelled and must not be presented as official offerings."""
+    return {"ok": True, "programmes": curriculum.list_programs(), "minors": curriculum.official_minors()}
+
+
+@tool
+def get_degree_plan(programme: str, track: str = "") -> dict:
+    """Semester-wise curriculum of one degree programme exactly as printed in the official prospectus (courses, credit hours, prerequisites).
+
+    Args:
+        programme: Programme code or name, e.g. 'BSCE' or 'BS Computer Engineering'.
+        track: Optional track/stream for programmes whose semesters 5-8 differ per track.
+    """
+    return {"ok": True, **curriculum.get_program(programme, track or None)}
+
+
+@tool
+def get_my_degree_progress(programme: str = "", track: str = "") -> dict:
+    """The student's progress through a programme's official curriculum: completed / in-progress / eligible / blocked / remaining courses and credit hours.
+    Leave programme empty for the student's own programme; pass another programme to see a what-if for switching.
+
+    Args:
+        programme: Optional programme code or name.
+        track: Optional track.
+    """
+    return {"ok": True, **curriculum.degree_progress(context().actor, None, programme or None, track or None)}
 
 
 @tool
@@ -132,4 +162,4 @@ def ask_giki_policy(question: str) -> dict:
 
 COURSE_TOOLS = [get_available_courses, get_course_details, check_prerequisites, check_schedule_conflicts, get_my_registrations,
                 get_my_timetable, get_my_academic_record, register_for_course, drop_course, recommend_electives,
-                simulate_what_if_degree, ask_giki_policy]
+                simulate_what_if_degree, list_degree_programmes, get_degree_plan, get_my_degree_progress, ask_giki_policy]

@@ -66,7 +66,7 @@ def drop_2025_source():
 
 @pytest.fixture
 def ingested(actors):
-    text = "<<PAGE 47>>\n" + FCSE + X.AI
+    text = "<<PAGE 47>>\n" + FCSE + X.AI + "\n" + X.MINOR
     drop_2025_source()
     with db.tx() as cur:
         cur.execute("DELETE FROM program_courses"); cur.execute("DELETE FROM academic_programs")
@@ -116,3 +116,59 @@ def test_import_requires_academic_scope_and_a_stored_document(actors):
     drop_2025_source()
     with pytest.raises(ValidationFailed):
         curriculum.import_prospectus_2025(actors["acad"])
+
+
+# ── degree progress, demo initialisation, official minors ──
+@pytest.fixture
+def imported(actors, ingested):
+    curriculum.import_prospectus_2025(actors["acad"])
+    yield
+    with db.tx() as cur:
+        cur.execute("DELETE FROM student_course_progress"); cur.execute("DELETE FROM course_history WHERE term='Demo assumption'")
+        cur.execute("UPDATE student_profiles SET program_id=NULL, is_demo=FALSE")
+        cur.execute("DELETE FROM course_history WHERE course_code IN (SELECT course_code FROM courses WHERE origin='official')")
+
+
+def test_demo_initialisation_is_explicit_idempotent_and_never_invents_grades(actors, imported):
+    from app.services import courses
+    with db.tx() as cur:
+        cur.execute("UPDATE student_profiles SET current_semester=2 WHERE user_id='2024668'")
+        cur.execute("DELETE FROM course_history WHERE user_id='2024668' AND course_code='CS101'")
+        cur.execute("INSERT INTO course_history (user_id, course_code, grade, term) VALUES ('2024668','CS101','A','Fall 2025')")      # a real, graded transcript row
+    from app.services.errors import Forbidden
+    with pytest.raises(Forbidden):
+        curriculum.init_demo_progress(actors["s2"], ["2024668"], "BSAI")
+    r1 = curriculum.init_demo_progress(actors["acad"], ["2024668"], "BSAI")["students"][0]
+    assert r1["newly_marked_passed"] > 0 and r1["newly_marked_in_progress"] > 0
+    hist = {h["course_code"]: h for h in db.query("SELECT * FROM course_history WHERE user_id='2024668'")}
+    assert hist["CS101"]["grade"] == "A" and hist["CS101"]["term"] == "Fall 2025"                     # verified transcript untouched
+    assert hist["MT101"]["grade"] == "B"                                                              # a seeded transcript row is never replaced
+    assert any(h["grade"] == "P" and h["term"] == "Demo assumption" for h in hist.values())            # marker, not an invented letter grade
+    assert curriculum.init_demo_progress(actors["acad"], ["2024668"], "BSAI")["students"][0]["newly_marked_passed"] == 0     # idempotent
+    assert db.query_one("SELECT is_demo FROM student_profiles WHERE user_id='2024405'")["is_demo"] is False                   # others untouched
+    assert db.query_one("SELECT COUNT(*) AS n FROM enrollments WHERE user_id='2024668'")["n"] == 0                            # nothing was registered / timetabled
+    rec = courses.academic_record(actors["s2"])
+    assert rec["cgpa"] is not None and all(h["grade"] != "P" or h["term"] == "Demo assumption" for h in rec["history"])
+    pr = curriculum.degree_progress(actors["s2"])
+    assert pr["program"]["code"] == "BSAI" and pr["credits"]["completed"] > 0 and pr["demo_assumption"] is True
+    statuses = {c["course_code"]: c["status"] for s in pr["semesters"] for c in s["courses"] if c["course_code"]}
+    assert statuses["MT101"] == "completed" and statuses["CS112"] in ("in_progress", "eligible", "completed")
+
+
+def test_degree_progress_what_if_for_another_programme_and_prerequisite_blocking(actors, imported):
+    pr = curriculum.degree_progress(actors["s3"], None, "BSAI")
+    assert pr["is_students_own_programme"] is False and pr["credits"]["completed"] > 0          # codes the student already passed count towards the other programme
+    by = {c["course_code"]: c for s in pr["semesters"] for c in s["courses"] if c["course_code"]}
+    assert by["CS112L"]["status"] == "blocked" and "CS101L" in by["CS112L"]["missing_prerequisites"]          # the official plan requires CS101L first
+    assert by["MT101"]["status"] == "completed"
+
+
+def test_only_official_minors_are_offered_by_default_and_unverified_are_labelled(actors, imported):
+    from app.services import courses
+    sim = courses.what_if(actors["s1"])
+    assert [m["minor"] for m in sim["minors"]] == ["Management for Engineers"] and sim["minors"][0]["official"] is True
+    mfe = sim["minors"][0]
+    assert mfe["progress_pct"] is None and "does not state" in mfe["requirement_note"] and "MS412" in mfe["course_pool"] or mfe["course_pool"] == []
+    named = courses.what_if(actors["s1"], ["Artificial Intelligence"])["minors"][0]
+    assert named["official"] is False and "NOT been verified" in named["warning"]
+    assert db.query_one("SELECT status FROM degree_minors WHERE minor_name='Software Systems'")["status"] == "unverified"

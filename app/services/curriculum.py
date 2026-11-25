@@ -296,3 +296,144 @@ def import_prospectus_2025(actor: Actor | None = None) -> dict:
         cur.execute("UPDATE degree_minors SET status='unverified' WHERE status<>'official' OR source_url IS NULL")
         audit.log(cur, actor, "curriculum.import", "knowledge", "prospectus_2025", detail=stats)
     return {**stats, "rejected_rows": len(parsed["rejected"]), "source_id": sid}
+
+
+# ═══ Degree-structure queries (planner / what-if / assistant) ═══
+
+def _program(cur, code: str) -> dict:
+    cur.execute("SELECT * FROM academic_programs WHERE code=%s OR lower(name)=lower(%s)", ((code or "").strip(), (code or "").strip()))
+    p = cur.fetchone()
+    if not p:
+        raise NotFound(f"Programme '{code}' was not found. Use list_programs to see the available degree programmes.")
+    return dict(p)
+
+
+def list_programs() -> list[dict]:
+    rows = db.query("""SELECT p.code, p.name, p.faculty, p.plan_status, p.source_url, p.source_page, p.retrieved_at,
+                              (SELECT COALESCE(json_agg(t.name ORDER BY t.name) FILTER (WHERE t.kind='track'), '[]') FROM program_tracks t WHERE t.program_id=p.program_id) AS tracks,
+                              (SELECT COUNT(*) FROM program_courses c WHERE c.program_id=p.program_id AND c.track_id IS NULL) AS common_rows
+                       FROM academic_programs p WHERE p.status='active' ORDER BY p.faculty, p.name""")
+    return rows
+
+
+def _rows(cur, program_id: int, track: str | None) -> tuple[list[dict], list[str], str | None]:
+    cur.execute("SELECT track_id, name FROM program_tracks WHERE program_id=%s AND kind='track' ORDER BY track_id", (program_id,))
+    tracks = [dict(r) for r in cur.fetchall()]
+    chosen = None
+    if tracks:
+        names = {t["name"].lower(): t for t in tracks}
+        chosen = names.get((track or "").lower()) or tracks[0]
+        if track and (track or "").lower() not in names:
+            raise NotFound(f"Track '{track}' does not exist for this programme. Available: {', '.join(t['name'] for t in tracks)}.")
+    cur.execute("""SELECT pc.*, c.catalog_only, c.slot, c.title AS catalogue_title FROM program_courses pc LEFT JOIN courses c ON c.course_code=pc.course_code
+                   WHERE pc.program_id=%s AND (pc.track_id IS NULL OR pc.track_id=%s) ORDER BY pc.semester, pc.kind DESC, pc.course_code NULLS LAST, pc.title""", (program_id, chosen["track_id"] if chosen else 0))
+    return [dict(r) for r in cur.fetchall()], [t["name"] for t in tracks], (chosen["name"] if chosen else None)
+
+
+def get_program(code: str, track: str | None = None) -> dict:
+    """Semester-wise curriculum of a programme exactly as printed in the prospectus (per track where the programme has tracks)."""
+    with db.tx() as cur:
+        p = _program(cur, code)
+        rows, tracks, chosen = _rows(cur, p["program_id"], track)
+        cur.execute("SELECT name, kind FROM program_tracks WHERE program_id=%s ORDER BY kind, name", (p["program_id"],))
+        sems: dict[int, list] = {}
+        for r in rows:
+            sems.setdefault(r["semester"], []).append({"course_code": r["course_code"], "title": r["title"], "credit_hours": r["credit_hours"], "lecture_hours": r["lecture_hours"], "lab_hours": r["lab_hours"],
+                                                       "prerequisites": r["prereq_text"], "prereq_status": r["prereq_status"], "kind": r["kind"], "lab_of": r["lab_of"], "credit_derived": r["credit_derived"],
+                                                       "offered_this_term": bool(r["course_code"] and r["catalog_only"] is False and r["slot"])})
+        return {"code": p["code"], "name": p["name"], "faculty": p["faculty"], "plan_status": p["plan_status"], "review_notes": p["review_notes"], "source_url": p["source_url"], "source_page": p["source_page"],
+                "tracks": tracks, "selected_track": chosen, "track_note": "Semesters 5-8 differ per track; semesters 1-4 are common." if tracks else None,
+                "semesters": [{"semester": k, "credits": sum(x["credit_hours"] for x in v), "courses": v} for k, v in sorted(sems.items())],
+                "total_credits": sum(r["credit_hours"] for r in rows)}
+
+
+def degree_progress(actor: Actor, student_id: str | None = None, program_code: str | None = None, track: str | None = None) -> dict:
+    """Where a student stands in a programme's official curriculum: completed, in progress, eligible, blocked by prerequisites, remaining.
+    With `program_code` of another programme this is the what-if for changing programme: passed courses count wherever the same code appears."""
+    from . import courses as C
+    sid = actor.resolve_student(student_id, "academic")
+    with db.tx() as cur:
+        cur.execute("SELECT program, program_id, current_semester, is_demo FROM student_profiles WHERE user_id=%s", (sid,))
+        prof = cur.fetchone() or {}
+        if program_code:
+            p = _program(cur, program_code)
+        elif prof.get("program_id"):
+            cur.execute("SELECT * FROM academic_programs WHERE program_id=%s", (prof["program_id"],)); p = dict(cur.fetchone())
+        else:
+            p = _program(cur, prof.get("program") or "")
+        rows, tracks, chosen = _rows(cur, p["program_id"], track)
+        passed = C._passed(cur, sid)
+        term = C._term(cur)
+        regs = {c["course_code"]: c for c in C._registered(cur, sid, term)}
+        cur.execute("SELECT program_course_id FROM student_course_progress WHERE user_id=%s AND status='in_progress'", (sid,))
+        marked = {r["program_course_id"] for r in cur.fetchall()}
+        out_sems: dict[int, list] = {}
+        totals = {"completed": 0, "in_progress": 0, "remaining": 0}
+        conflicts = []
+        for r in rows:
+            code, info = r["course_code"], _prereq_info(r["prereq_text"] or "")
+            if code and code in passed:
+                st = "completed"
+            elif (code and code in regs) or r["id"] in marked:
+                st = "in_progress"
+            elif r["kind"] == "slot":
+                st = "open_slot"
+            else:
+                miss = [c for c in info["codes"] if c not in passed] if info["status"] == "parsed" else []
+                st = "blocked" if miss else "eligible"
+            row = {"program_course_id": r["id"], "course_code": code, "title": r["title"], "credit_hours": r["credit_hours"], "status": st, "kind": r["kind"], "prerequisites": r["prereq_text"],
+                   "prereq_status": r["prereq_status"], "missing_prerequisites": [c for c in info["codes"] if c not in passed] if (st == "blocked") else [],
+                   "offered_this_term": bool(code and r["catalog_only"] is False and r["slot"])}
+            if row["offered_this_term"] and st in ("eligible", "blocked") and regs:
+                for reg in regs.values():
+                    cf = C.find_conflicts({"course_code": code, "slot": r["slot"], "lab_slot": None}, reg)
+                    if cf:
+                        conflicts.append({"course": code, "conflicts_with": reg["course_code"], "detail": cf}); row["timetable_conflict"] = True
+            out_sems.setdefault(r["semester"], []).append(row)
+            totals["completed" if st == "completed" else "in_progress" if st == "in_progress" else "remaining"] += r["credit_hours"]
+        total = sum(totals.values())
+        cur.execute("SELECT status, minor_name FROM degree_minors")
+        return {"student_id": sid, "program": {"code": p["code"], "name": p["name"], "faculty": p["faculty"], "plan_status": p["plan_status"], "source_url": p["source_url"], "source_page": p["source_page"]},
+                "is_students_own_programme": (prof.get("program_id") == p["program_id"]) or (prof.get("program") == p["name"]), "tracks": tracks, "selected_track": chosen,
+                "current_semester": prof.get("current_semester"), "term": term, "credits": {**totals, "total": total},
+                "semesters": [{"semester": k, "courses": v, "credits_completed": sum(x["credit_hours"] for x in v if x["status"] == "completed")} for k, v in sorted(out_sems.items())],
+                "remaining_courses": [x["course_code"] or x["title"] for v in out_sems.values() for x in v if x["status"] in ("eligible", "blocked", "open_slot")],
+                "timetable_conflicts": conflicts, "demo_assumption": bool(prof.get("is_demo")),
+                "notes": ["Elective slots have no fixed course code; they are completed by choosing an eligible course.",
+                          "Timetable conflicts are only checked for courses that have a scheduled offering this term." if conflicts == [] else "Some remaining courses clash with your current timetable."]}
+
+
+@op("curriculum.init_demo_progress", "user", "student_ids")
+def init_demo_progress(actor: Actor, student_ids: list[str], program_code: str | None = None, track: str | None = None) -> dict:
+    """Repeatable, idempotent initialisation for EXPLICITLY designated demo/seed students: every earlier semester of their programme is marked passed
+    (grade 'P', term 'Demo assumption': no letter grade is invented) and the current semester is marked in progress. Existing transcript rows are never changed,
+    nothing is registered or timetabled, and accounts that are not listed are untouched."""
+    actor.require_scope("academic")
+    if not student_ids:
+        raise ValidationFailed("Please name the demo student accounts to initialise.")
+    report = []
+    with db.tx() as cur:
+        for sid in student_ids:
+            cur.execute("SELECT u.role, sp.program, sp.current_semester FROM users u LEFT JOIN student_profiles sp USING (user_id) WHERE u.user_id=%s", (sid,))
+            u = cur.fetchone()
+            if not u or u["role"] != "student":
+                raise ValidationFailed(f"{sid} is not a student account.")
+            p = _program(cur, program_code or u["program"] or "")
+            rows, _, _ = _rows(cur, p["program_id"], track)
+            sem = u["current_semester"] or 1
+            cur.execute("UPDATE student_profiles SET program_id=%s, is_demo=TRUE WHERE user_id=%s", (p["program_id"], sid))
+            done = prog = 0
+            for r in rows:
+                if r["semester"] < sem and r["course_code"] and r["kind"] == "course":
+                    cur.execute("INSERT INTO course_history (user_id, course_code, grade, term) VALUES (%s,%s,'P','Demo assumption') ON CONFLICT (user_id, course_code) DO NOTHING", (sid, r["course_code"]))
+                    done += cur.rowcount
+                elif r["semester"] == sem:
+                    cur.execute("INSERT INTO student_course_progress (user_id, program_course_id) VALUES (%s,%s) ON CONFLICT DO NOTHING", (sid, r["id"]))
+                    prog += cur.rowcount
+            report.append({"student_id": sid, "program": p["code"], "current_semester": sem, "newly_marked_passed": done, "newly_marked_in_progress": prog})
+        audit.log(cur, actor, "curriculum.init_demo_progress", "user", ",".join(student_ids), detail={"report": report})
+    return {"ok": True, "students": report}
+
+
+def official_minors() -> list[dict]:
+    return db.query("SELECT minor_name, description, status, offered_by, source_url, source_page, requirements_stated, required_credits, course_pool FROM degree_minors ORDER BY (status='official') DESC, minor_name")
