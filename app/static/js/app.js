@@ -18,7 +18,7 @@ function navFor(u) {
   if (has('academic')) items.push(['Academics', [['#/admin/courses', 'Course Management'], ['#/admin/knowledge', 'Official GIKI Data']]]);
   if (has('super')) items.push(['#/admin/users', 'Student Management']);
   if (has('mess')) items.push(['#/admin/mess', 'Mess Administration']);
-  if (has('requisition')) items.push(['#/admin/requisitions', 'Requisition Approvals'], ['Resources', [['#/admin/sports', 'Sports & Venues'], ['#/admin/equipment', 'Equipment Inventory']]]);
+  if (has('requisition')) items.push(['#/admin/requisitions', 'Requisition Approvals'], ['Resources', [['#/admin/societies', 'Society Management'], ['#/admin/sports', 'Sports & Venues'], ['#/admin/equipment', 'Equipment Inventory']]]);
   const reports = [['#/admin/reports', 'Reports & Analytics']];
   if (has('super')) reports.push(['#/admin/settings', 'Rules & Settings'], ['#/admin/audit', 'Audit & Events']);
   items.push(['Reports & System', reports]);
@@ -31,7 +31,7 @@ const routes = {
   '/notifications': () => import('./pages/notifications.js'), '/assistant': () => import('./pages/assistant.js'), '/approvals': () => import('./pages/approvals.js'),
   '/mess-forecast': () => import('./pages/forecast.js'),
   '/admin': () => import('./pages/admin_dashboard.js'), '/admin/reports': () => import('./pages/admin_overview.js'), '/admin/knowledge': () => import('./pages/admin_knowledge.js'), '/profile': () => import('./pages/profile.js'), '/admin/courses': () => import('./pages/admin_courses.js'), '/admin/mess': () => import('./pages/admin_mess.js'),
-  '/admin/requisitions': () => import('./pages/admin_requisitions.js'), '/admin/sports': () => import('./pages/admin_sports.js'),
+  '/admin/requisitions': () => import('./pages/admin_requisitions.js'), '/admin/sports': () => import('./pages/admin_sports.js'), '/admin/societies': () => import('./pages/admin_societies.js'),
   '/admin/equipment': () => import('./pages/admin_equipment.js'), '/admin/users': () => import('./pages/admin_users.js'),
   '/admin/settings': () => import('./pages/admin_settings.js'), '/admin/audit': () => import('./pages/admin_audit.js'),
 };

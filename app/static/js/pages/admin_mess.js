@@ -1,17 +1,17 @@
 import { api, qs } from '../api.js';
-import { h, clear, table, badge, tabs, modal, confirmDialog, toast, field, select, pageHead, fmtDate, fmtDateTime, money, addDays } from '../ui.js';
+import { h, put, clear, clearFieldErrors, showFieldErrors, table, badge, tabs, modal, confirmDialog, toast, field, select, pageHead, fmtDate, fmtDateTime, money, addDays } from '../ui.js';
 
 export async function render(root, ctx) {
   root.append(pageHead('Mess Administration', 'Rates, monthly invoicing, payment verification, security deposits, final clearance, attendance and menu.'));
   const holder = h('div'); root.append(holder);
-  tabs(holder, [{ key: 'b', label: 'Billing & rates', render: () => billing(ctx) }, { key: 'p', label: 'Payments to verify', render: () => payments(ctx) }, { key: 'd', label: 'Security deposits', render: () => deposits(ctx) },
+  tabs(holder, [{ key: 'x', label: 'Food expenditure', render: () => expenditure(ctx) }, { key: 'b', label: 'Billing & rates', render: () => billing(ctx) }, { key: 'p', label: 'Payments to verify', render: () => payments(ctx) }, { key: 'd', label: 'Security deposits', render: () => deposits(ctx) },
     { key: 'c', label: 'Final clearance', render: () => clearances(ctx) }, { key: 'a', label: 'Attendance', render: attendance }, { key: 'm', label: 'Menu & nutrition', render: menu }, { key: 'f', label: 'Demand forecast', render: forecast }, { key: 'g', label: 'Gate-pass sync', render: gate }]);
 }
 
 async function billing(ctx) {
   const [rates, sum, dues] = await Promise.all([api.get('/api/mess/admin/rates'), api.get('/api/mess/admin/summary'), api.get('/api/mess/admin/dues')]);
   const wrap = h('div');
-  const mode = h('select', null, [['per_meal', 'Per meal (rate for breakfast/lunch/dinner)'], ['per_day', 'Per day (one daily rate)']].map(([v, t]) => h('option', { value: v, selected: v === rates.billing_mode }, t)));
+  const mode = h('select', null, [['shared_cost', 'Shared cost (food expenditure ÷ students using the mess)'], ['per_meal', 'Per meal (rate for breakfast/lunch/dinner)'], ['per_day', 'Per day (one daily rate)']].map(([v, t]) => h('option', { value: v, selected: v === rates.billing_mode }, t)));
   const meal = select(['breakfast', 'lunch', 'dinner', 'daily'], rates.billing_mode === 'per_day' ? 'daily' : 'breakfast'); const rate = h('input', { type: 'number', min: 0, step: '0.01', placeholder: 'PKR' }); const eff = h('input', { type: 'date', value: addDays(0) });
   wrap.append(h('div', { class: 'grid g4' }, h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Invoiced'), h('div', { class: 'v' }, money(sum.invoiced_pkr))), h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Collected'), h('div', { class: 'v' }, money(sum.collected_pkr))),
     h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Outstanding'), h('div', { class: 'v' }, money(sum.outstanding_pkr))), h('div', { class: 'card stat' }, h('div', { class: 'l' }, 'Deposits held'), h('div', { class: 'v' }, money(sum.deposits_held_pkr)))));
@@ -106,4 +106,41 @@ async function gate() {
   return h('div', { class: 'card' }, h('h2', null, 'Gate-pass synchronisation'), h('div', { class: 'alert info' }, 'Gate-passes arrive from the campus security gate controller via POST /api/mess/gate-pass-sync (X-Gate-Key). This form performs the same call manually. Gate-passes are informational records; they do not affect billing. No gate hardware is controlled from this portal.'),
     h('div', { class: 'form-grid' }, field('Student ID', f.user_id), field('Destination', f.destination), field('Leave from', f.leave_start), field('Leave to', f.leave_end), field('External reference', f.external_ref)),
     h('button', { class: 'btn primary', onclick: async () => { try { await api.post('/api/mess/gate-pass-sync', { user_id: f.user_id.value.trim(), leave_start: f.leave_start.value, leave_end: f.leave_end.value, destination: f.destination.value || null, external_ref: f.external_ref.value || null, approved: true }); toast('Gate-pass synchronised.', 'ok'); } catch (e) { toast(e.message, 'bad'); } } }, 'Sync gate-pass'));
+}
+
+
+// Monthly food expenditure (numerator) and the backend's verified-user count (denominator). The per-student figure is computed by the server.
+async function expenditure(ctx) {
+  const rows = await api.get('/api/mess/admin/expenses-overview'); const wrap = h('div');
+  const now = new Date(); const cur = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const month = h('input', { name: 'month', type: 'month', value: cur }); const amount = h('input', { name: 'amount_pkr', type: 'number', min: 0, step: '0.01', placeholder: 'Total for the month, PKR' }); const note = h('input', { name: 'description', maxlength: 200, placeholder: 'Optional note' });
+  const box = h('div', { class: 'card' }, h('h2', null, 'Record monthly food expenditure'),
+    h('p', { class: 'muted' }, 'Enter the TOTAL food expenditure of one billing month. Students using the mess are counted by the system from verified entries; the estimate per student is calculated by the backend as total expenditure ÷ distinct verified students. The PKR 15,000 security deposit is separate and never used here.'),
+    h('div', { class: 'form-grid' }, field('Billing month', month), field('Total food expenditure (PKR)', amount), field('Note', note)),
+    h('button', { class: 'btn primary', onclick: async () => {
+      clearFieldErrors(box);
+      try { const r = await api.post('/api/mess/admin/expenses', { month: month.value, amount_pkr: amount.value === '' ? null : Number(amount.value), description: note.value });
+        toast(`Recorded. Estimated bill per student: ${r.estimated_per_student_pkr == null ? 'not available yet (no verified mess users)' : money(r.estimated_per_student_pkr)}.`, 'ok', 7000); ctx.refresh(); }
+      catch (e) { if (e.fields && showFieldErrors(box, e.fields)) return; toast(e.message, 'bad', 7000); } } }, 'Record expenditure'));
+  wrap.append(box);
+  wrap.append(h('div', { class: 'card' }, h('h2', null, 'Monthly expenditure and estimated bills'), table([
+    { label: 'Month', render: r => h('b', null, r.label) },
+    { label: 'Total food expenditure', render: r => r.total_food_expenditure_pkr == null ? h('span', { class: 'muted' }, 'not recorded') : money(r.total_food_expenditure_pkr) },
+    { label: 'Verified students using mess', key: 'students_using_mess' },
+    { label: 'Estimated per student', render: r => r.estimated_per_student_pkr == null ? '—' : h('b', null, money(r.estimated_per_student_pkr)) },
+    { label: 'Status', render: r => badge(r.status, { finalized: 'ok', recorded: 'info', 'not recorded': 'mute' }[r.status]) },
+    { label: 'Recorded by', render: r => r.recorded ? h('div', null, r.recorded_by || '—', h('div', { class: 'small muted' }, fmtDateTime(r.recorded_at), r.revisions ? ` · ${r.revisions} correction(s)` : '')) : '—' },
+    { label: '', render: r => r.recorded && r.status !== 'finalized' ? h('button', { class: 'btn sm', onclick: () => correct(r) }, 'Correct') : r.status === 'finalized' ? h('span', { class: 'small muted' }, 'locked – invoiced') : null }], rows)));
+  const hist = await api.get('/api/mess/admin/expenses');
+  wrap.append(h('div', { class: 'card' }, h('h2', null, 'Record history (nothing is overwritten)'), table([{ label: 'Month', render: e => String(e.period).slice(0, 7) }, { label: 'Amount', render: e => money(e.amount_pkr) }, { label: 'State', render: e => badge(e.status, e.status === 'active' ? 'ok' : 'mute') },
+    { label: 'By', render: e => e.recorded_by_name || e.recorded_by }, { label: 'When', render: e => fmtDateTime(e.recorded_at) }, { label: 'Correction reason', render: e => e.correction_reason || '—' }], hist, { empty: 'No expenditure recorded yet.' })));
+  function correct(r) {
+    const a = h('input', { name: 'amount_pkr', type: 'number', min: 0, step: '0.01', value: r.total_food_expenditure_pkr }); const why = h('input', { name: 'reason', maxlength: 300, placeholder: 'Why is the figure being corrected?' });
+    const body = h('div', null, h('p', null, `The current figure for ${r.label} (${money(r.total_food_expenditure_pkr)}) will be kept in the history as superseded.`), field('Corrected total (PKR)', a), field('Reason', why));
+    modal({ title: `Correct ${r.label}`, body, actions: [{ label: 'Cancel', onClick: c => c() }, { label: 'Save correction', kind: 'primary', onClick: async (close) => {
+      clearFieldErrors(body);
+      try { await api.put(`/api/mess/admin/expenses/${r.month}`, { amount_pkr: a.value === '' ? null : Number(a.value), reason: why.value }); close(); toast('Correction recorded.', 'ok'); ctx.refresh(); }
+      catch (e) { if (e.fields && showFieldErrors(body, e.fields)) return false; throw e; } } }] });
+  }
+  return wrap;
 }
