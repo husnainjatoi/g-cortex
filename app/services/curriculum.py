@@ -360,7 +360,11 @@ def degree_progress(actor: Actor, student_id: str | None = None, program_code: s
         elif prof.get("program_id"):
             cur.execute("SELECT * FROM academic_programs WHERE program_id=%s", (prof["program_id"],)); p = dict(cur.fetchone())
         else:
-            p = _program(cur, prof.get("program") or "")
+            cur.execute("SELECT * FROM academic_programs WHERE lower(name)=lower(%s)", (prof.get("program") or "",))
+            p = cur.fetchone()
+            if not p:                                   # not an error: the curriculum for this student's programme just has not been imported / set up
+                return {"student_id": sid, "program": None, "message": "Your degree programme has no imported curriculum yet, so degree progress cannot be shown."}
+            p = dict(p)
         rows, tracks, chosen = _rows(cur, p["program_id"], track)
         passed = C._passed(cur, sid)
         term = C._term(cur)

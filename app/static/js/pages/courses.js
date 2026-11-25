@@ -106,7 +106,8 @@ const STATUS = { completed: ['completed', 'ok'], in_progress: ['in progress', 'i
 async function degree() {
   const wrap = h('div'); const body = h('div');
   const progs = await api.get('/api/courses/programs'); const mine = await api.get('/api/courses/me/degree-progress');
-  const prog = select(progs.map(p => [p.code, p.name]), mine.program.code, { id: 'degree-programme' }); const trackSel = h('select', { id: 'degree-track' });
+  if (!progs.length) return h('div', { class: 'alert warn' }, 'The official degree plans have not been imported yet. An administrator can import them from Official GIKI Data.');
+  const prog = select(progs.map(p => [p.code, p.name]), mine.program ? mine.program.code : progs[0].code, { id: 'degree-programme' }); const trackSel = h('select', { id: 'degree-track' });
   const draw = async (code, track) => {
     try {
       const d = await api.get('/api/courses/me/degree-progress' + qs({ program: code, track }));
@@ -127,7 +128,7 @@ async function degree() {
   };
   prog.addEventListener('change', () => draw(prog.value)); trackSel.addEventListener('change', () => draw(prog.value, trackSel.value));
   wrap.append(h('div', { class: 'card' }, h('div', { class: 'row' }, h('div', { style: 'min-width:260px' }, field('Degree programme', prog)), h('div', { style: 'min-width:260px' }, field('Track (semesters 5-8)', trackSel)))), body);
-  await draw(mine.program.code, mine.selected_track);
+  await draw(mine.program ? mine.program.code : progs[0].code, mine.selected_track);
   return wrap;
 }
 const statCard2 = (l, v) => h('div', { class: 'card stat' }, h('div', { class: 'l' }, `${l} (credit hours)`), h('div', { class: 'v' }, v));

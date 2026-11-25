@@ -19,7 +19,7 @@ export async function render(root, { user }) {
       table([{ label: 'ID', key: 'requisition_id' }, { label: 'Event', key: 'event_title' }, { label: 'Waiting on', render: r => r.pending_authority || '—' }], d.requisitions, { empty: 'No requisitions awaiting approval.' }),
       h('p', null, h('a', { href: '#/requisitions' }, 'Manage requisitions →')))));
   root.append(h('div', { class: 'grid g2' },
-    h('div', { class: 'card', id: 'degree-card' }, h('h2', null, 'Degree progress'), deg
+    h('div', { class: 'card', id: 'degree-card' }, h('h2', null, 'Degree progress'), deg && deg.program
       ? [h('p', null, h('b', null, deg.program.name), ` · semester ${deg.current_semester}`), h('div', { class: 'bar' }, h('i', { style: `width:${Math.round(100 * deg.credits.completed / Math.max(1, deg.credits.total))}%` })),
          h('p', { class: 'small muted' }, `${deg.credits.completed} of ${deg.credits.total} credit hours completed · ${deg.credits.in_progress} in progress${deg.demo_assumption ? ' (demo assumption)' : ''}`), h('p', null, h('a', { href: '#/courses' }, 'Open degree plan →'))]
       : h('p', { class: 'muted' }, 'Your degree programme is not set up yet.')),
