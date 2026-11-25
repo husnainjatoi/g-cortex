@@ -1,20 +1,24 @@
 // Thin fetch wrapper. Authentication is a server-side HttpOnly session cookie; no tokens or secrets live in JS.
 export class ApiError extends Error {
-  constructor(status, detail, code, details) { super(detail); this.status = status; this.code = code; this.details = details; }
+  constructor(status, detail, code, details, fields) { super(detail); this.status = status; this.code = code; this.details = details; this.fields = fields || null; this.friendly = true; }
 }
 
 async function request(method, path, body) {
-  const res = await fetch(path, {
-    method, credentials: 'same-origin',
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method, credentials: 'same-origin',
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (_) { throw new ApiError(0, 'We could not reach the server. Please check your connection and try again.', 'network'); }
   let data = null;
   try { data = await res.json(); } catch (_) { /* empty body */ }
   if (!res.ok) {
-    let detail = data && data.detail;
-    if (Array.isArray(detail)) detail = detail.map(d => `${(d.loc || []).slice(-1)[0]}: ${d.msg}`).join('; ');
-    throw new ApiError(res.status, detail || `Request failed (${res.status})`, data && data.code, data && data.details);
+    // The backend sends plain-language messages (and per-field messages for forms); never surface raw validation objects or status codes.
+    const detail = data && typeof data.detail === 'string' ? data.detail : null;
+    const fallback = res.status >= 500 ? 'Something went wrong on our side. Please try again later.' : res.status === 401 ? 'Please sign in to continue.' : res.status === 403 ? "You don't have permission to do that." : res.status === 404 ? "We couldn't find what you were looking for." : 'Some of the information you entered is missing or invalid. Please check and try again.';
+    throw new ApiError(res.status, detail || fallback, data && data.code, data && data.details, data && data.fields);
   }
   return data;
 }

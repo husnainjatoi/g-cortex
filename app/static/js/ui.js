@@ -17,6 +17,36 @@ export function h(tag, attrs, ...kids) {
 }
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const clear = (el) => { el.replaceChildren(); return el; };
+// Element.append(array) would stringify the array ("[object HTMLDivElement],..."), so anything dynamic goes through put(), which flattens and skips empties.
+export const put = (el, ...kids) => { el.replaceChildren(...kids.flat(Infinity).filter(k => k !== null && k !== undefined && k !== false).map(k => (k.nodeType ? k : document.createTextNode(String(k))))); return el; };
+
+// Show/hide password control. The same <input> is kept (only its type flips) so what the user typed is never cleared.
+export function passwordInput(attrs = {}) {
+  const input = h('input', { type: 'password', autocomplete: 'current-password', ...attrs });
+  const btn = h('button', { type: 'button', class: 'pw-toggle', 'aria-label': 'Show password', 'aria-pressed': 'false', title: 'Show password',
+    onmousedown: (e) => e.preventDefault(),
+    onclick: () => { const show = input.type === 'password'; input.type = show ? 'text' : 'password'; btn.textContent = show ? 'Hide' : 'Show';
+      btn.setAttribute('aria-pressed', String(show)); const l = show ? 'Hide password' : 'Show password'; btn.setAttribute('aria-label', l); btn.title = l; } }, 'Show');
+  return h('div', { class: 'pw-wrap' }, input, btn);
+}
+
+// Inline, plain-language field errors. `fields` maps input names to messages (from the API's `fields`).
+export function clearFieldErrors(scope) {
+  scope.querySelectorAll('.field-error').forEach(n => n.remove());
+  scope.querySelectorAll('.has-error').forEach(n => n.classList.remove('has-error'));
+}
+export function showFieldErrors(scope, fields) {
+  let unmatched = false, first = null;
+  for (const [name, msg] of Object.entries(fields || {})) {
+    const input = scope.querySelector(`[name="${CSS.escape(name)}"]`);
+    const box = input && (input.closest('.field') || input.parentElement);
+    if (!box) { unmatched = true; continue; }
+    box.classList.add('has-error'); input.setAttribute('aria-invalid', 'true');
+    box.append(h('div', { class: 'field-error', role: 'alert' }, msg)); first = first || input;
+  }
+  if (first) first.focus();
+  return !unmatched;
+}
 
 export function toast(msg, kind = 'info', ms = 4500) {
   const t = h('div', { class: `toast ${kind}` }, msg);
@@ -55,7 +85,7 @@ export function tabs(container, items, initial) {
     bar.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.k === key));
     clear(body).append(h('div', { class: 'muted' }, 'Loading…'));
     try { const node = await items.find(i => i.key === key).render(); clear(body).append(node); }
-    catch (e) { clear(body).append(h('div', { class: 'alert bad' }, e.message)); }
+    catch (e) { clear(body).append(errorBox(e)); }
   };
   items.forEach(i => bar.append(h('button', { 'data-k': i.key, onclick: () => show(i.key) }, i.label)));
   container.append(bar, body);
@@ -110,11 +140,18 @@ export function stackBar(parts) {
 }
 export const statCard = (label, value, sub) => h('div', { class: 'card stat' }, h('div', { class: 'l' }, label), h('div', { class: 'v' }, value), sub ? h('div', { class: 's' }, sub) : null);
 export const pageHead = (title, sub, ...actions) => h('div', { class: 'page-head' }, h('div', null, h('h1', null, title), sub ? h('p', null, sub) : null), h('div', { class: 'right row' }, actions));
-export function errorBox(e) { return h('div', { class: 'alert bad' }, e.message || String(e)); }
+export function errorBox(e) { return h('div', { class: 'alert bad', role: 'alert' }, e && e.friendly ? e.message : (e && e.message) || 'Something went wrong. Please try again.'); }
 export function form(fields, onSubmit, submitLabel = 'Submit', extra) {
-  const f = h('form', { onsubmit: async (ev) => {
-    ev.preventDefault(); const btn = f.querySelector('button[type=submit]'); btn.disabled = true;
-    try { await onSubmit(Object.fromEntries(new FormData(f).entries())); } catch (e) { toast(e.message, 'bad', 6500); } finally { btn.disabled = false; }
-  } }, h('div', { class: 'form-grid' }, fields), extra, h('button', { class: 'btn primary', type: 'submit' }, submitLabel));
+  const banner = h('div');
+  const f = h('form', { novalidate: true, onsubmit: async (ev) => {
+    ev.preventDefault(); const btn = f.querySelector('button[type=submit]'); btn.disabled = true; clearFieldErrors(f); clear(banner);
+    try { await onSubmit(Object.fromEntries(new FormData(f).entries())); }
+    catch (e) {
+      const named = e.fields && Object.keys(e.fields).length;
+      const allShown = named && showFieldErrors(f, e.fields);
+      if (!named) banner.append(h('div', { class: 'alert bad', role: 'alert' }, e.message));
+      else if (!allShown || e.fields && Object.keys(e.fields).length > 1) banner.append(h('div', { class: 'alert bad', role: 'alert' }, 'Please correct the highlighted fields and try again.'));
+    } finally { btn.disabled = false; }
+  } }, banner, h('div', { class: 'form-grid' }, fields), extra, h('button', { class: 'btn primary', type: 'submit' }, submitLabel));
   return f;
 }

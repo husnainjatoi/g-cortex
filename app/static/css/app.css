@@ -130,3 +130,11 @@ textarea{min-height:70px;resize:vertical} .field{margin-bottom:12px} .form-grid{
 @media (max-width:640px){.g2,.g3,.g4,.form-grid{grid-template-columns:1fr}.bars .br{grid-template-columns:100px 1fr 44px}.chat-panel{right:8px;bottom:84px}}
 
 .on-assistant .chat-fab,.on-assistant .chat-panel:not(.chat-full){display:none!important}
+
+/* password show/hide, inline field errors */
+.pw-wrap{position:relative;display:flex} .pw-wrap input{width:100%;padding-right:64px}
+.pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:var(--indigo);font-weight:700;font-size:12px;cursor:pointer;padding:6px 8px;border-radius:6px} .pw-toggle:hover{background:#eef0fb}
+.field-error{color:var(--bad);font-size:12.5px;margin-top:4px;font-weight:600} .field.has-error input,.field.has-error select,.field.has-error textarea{border-color:var(--bad);background:var(--bad-bg)}
+.seg{display:inline-flex;border:1px solid #ccd3e6;border-radius:9px;overflow:hidden;margin-bottom:14px} .seg button{border:0;background:#fff;padding:8px 16px;font-weight:600;cursor:pointer;color:var(--ink)} .seg button.active{background:var(--indigo);color:#fff}
+.venue-card{display:flex;flex-direction:column;gap:6px} .venue-card .tags{display:flex;flex-wrap:wrap;gap:6px}
+.force-wrap{min-height:100vh;display:grid;place-items:center;padding:20px;background:linear-gradient(135deg,#eef0ff,#f7fbff)} .force-card{max-width:480px;width:100%;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:26px}

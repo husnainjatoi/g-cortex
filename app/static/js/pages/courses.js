@@ -1,5 +1,5 @@
 import { api, qs } from '../api.js';
-import { h, clear, table, badge, tabs, modal, confirmDialog, toast, field, select, form, pageHead, fmtDate, errorBox } from '../ui.js';
+import { h, clear, put, table, badge, tabs, modal, confirmDialog, toast, field, select, form, pageHead, fmtDate, errorBox } from '../ui.js';
 
 const DAYS = ['M', 'T', 'W', 'Th', 'F', 'Sa'];
 const DAYN = { M: 'Mon', T: 'Tue', W: 'Wed', Th: 'Thu', F: 'Fri', Sa: 'Sat' };
@@ -136,7 +136,7 @@ async function ask() {
   const go = async () => {
     try {
       const r = await api.post('/api/courses/ask', { question: q.value });
-      clear(out).append(r.found ? [h('div', { class: 'alert ok' }, 'Answers below come from official GIKI documents (giki.edu.pk). Check the cited source for the authoritative text.'),
+      put(clear(out), r.found ? [h('div', { class: 'alert ok' }, 'Answers below come from official GIKI documents (giki.edu.pk). Check the cited source for the authoritative text.'),
         r.passages.map(p => h('div', { class: 'card flat' }, h('div', { class: 'row spread' }, h('b', null, p.source_title || 'GIKI document'), badge(p.similarity ? `match ${Math.round(p.similarity * 100)}%` : 'text match', 'info')),
           h('div', { class: 'small muted' }, [p.section ? `Section: ${p.section}` : null, p.page ? `p. ${p.page}` : null, p.retrieved_at ? `retrieved ${p.retrieved_at}` : null].filter(Boolean).join(' · ')), h('p', { style: 'white-space:pre-wrap' }, p.text),
           h('a', { href: p.source_url, target: '_blank', rel: 'noopener' }, p.source_url)))] : h('div', { class: 'alert warn' }, r.answer));
